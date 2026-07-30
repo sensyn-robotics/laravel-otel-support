@@ -108,9 +108,10 @@ its floor stays in `composer.json`, which is why CI never pins `orchestra/testbe
   autoload wiring is the consuming application's responsibility. Adding an SDK import to `src/` breaks
   that contract — a consumer without the SDK installed then gets a fatal error while the provider
   registers. Nothing else catches this (PHPStan and the tests both run with the SDK in `vendor/`), so CI
-  has a dedicated `runtime-dependencies` job that greps `src/` and `config/` for the `OpenTelemetry\SDK`
-  and `OpenTelemetry\Contrib` namespaces. `open-telemetry/sem-conv` is off limits for the same reason:
-  it is a dependency of the SDK, which is why the semconv names and values are string literals.
+  has a dedicated `runtime-dependencies` job that greps `src/` and `config/` for the `OpenTelemetry\SDK`,
+  `OpenTelemetry\SemConv` and `OpenTelemetry\Contrib` namespaces. `open-telemetry/sem-conv` is off limits
+  for the same reason — it is a dependency of the SDK — which is why the semconv names and values are
+  string literals.
 - **The package supports Laravel 10, 11, 12 and 13 from a single branch.** Do not use an API that does
   not exist in every supported version without guarding it — the queue event payloads in particular
   differ between Laravel 10 and 11+.

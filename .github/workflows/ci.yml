@@ -157,15 +157,30 @@ jobs:
       # job: PHPStan and PHPUnit both analyse and run with the SDK present in vendor/. It only breaks
       # in a consuming application that has no SDK installed - as a fatal error while the service
       # provider registers, i.e. the application does not start. This job is the gate for that.
-      # open-telemetry/sem-conv is covered too: it ships as a dependency of the SDK, which is why the
-      # semantic-convention names and values in src/ are string literals.
+      # open-telemetry/sem-conv (namespace OpenTelemetry\SemConv) is matched as well: it ships as a
+      # dependency of the SDK, which is why the semantic-convention names and values in src/ are
+      # string literals.
       - name: Assert src/ and config/ do not reference the OTel SDK
         run: |
-          if grep -rnE 'OpenTelemetry\\(SDK|Contrib)' src config; then
+          # grep exits 1 when nothing matched, which is the success case here, so the shell's -e must
+          # not abort on it - and 2 or above means grep itself failed (a renamed directory, an
+          # unreadable file). Treating that as "no match" would leave a gate that silently passes
+          # without having looked at anything, so it is failed closed below.
+          status=0
+          matches=$(grep -rnE 'OpenTelemetry\\(SDK|SemConv|Contrib)' src config) || status=$?
+
+          if [ "$status" -eq 0 ]; then
+            printf '%s\n' "$matches"
             echo "::error::Runtime code may only depend on open-telemetry/api and open-telemetry/context (see CONTRIBUTING.md)."
             exit 1
           fi
-          echo "OK: no SDK or Contrib references in runtime code."
+
+          if [ "$status" -ne 1 ]; then
+            echo "::error::The gate did not run: grep exited with $status (did src/ or config/ move?)."
+            exit 1
+          fi
+
+          echo "OK: no SDK, SemConv or Contrib references in runtime code."
 
   composer-validate:
     name: Validate composer.json
