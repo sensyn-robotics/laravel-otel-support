@@ -8,8 +8,10 @@ use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Support\ServiceProvider;
 use OpenTelemetry\API\Globals;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
+use OpenTelemetry\API\Metrics\Noop\NoopMeterProvider;
 use Sensyn\LaravelOTelSupport\Metrics\Http\HttpServerMetrics;
 use Sensyn\LaravelOTelSupport\Metrics\Queue\QueueMetrics;
+use Throwable;
 
 /**
  * OTel metrics 計装の登録。
@@ -29,7 +31,7 @@ class MetricsServiceProvider extends ServiceProvider
         // QueueMetrics) の解決時にだけ注入する。
         $this->app->when([HttpServerMetrics::class, QueueMetrics::class])
             ->needs(MeterProviderInterface::class)
-            ->give(static fn (): MeterProviderInterface => Globals::meterProvider());
+            ->give(static fn (): MeterProviderInterface => self::meterProvider());
 
         // HttpServerMetrics は global middleware で、pipeline と Kernel::terminateMiddleware で
         // リクエストごとに2回 make される。singleton にして meter/histogram 解決を1回に抑える。
@@ -62,6 +64,36 @@ class MetricsServiceProvider extends ServiceProvider
             // queue イベントの初回発火まで遅らせる。全 HTTP リクエスト / 全 artisan 実行で計装を
             // eager 生成しないため。購読タイミング自体は変わらない。
             QueueMetrics::subscribeLazily($this->app->make(Dispatcher::class));
+        }
+    }
+
+    /**
+     * contextual binding が注入する MeterProvider。Globals (SDK autoload) が失敗したら Noop に倒す。
+     *
+     * この factory は container が計装の constructor 引数を解決する時点、つまり計装の constructor 本体に
+     * 入る前に走る。よって計装側 (HttpServerMetrics / QueueMetrics) の constructor 内 try/catch では
+     * 絶対に捕まえられず、ここを守らない限り計装の失敗をアプリから隔離できない。着弾点は解決を要求した
+     * 側と同じで、いずれも計装とは無関係なアプリの処理を壊す:
+     *   - HTTP request: global stack 先頭の pipe = Pipeline::carry() の make() -> 全リクエストが 500。
+     *   - HTTP terminate: Kernel::terminateMiddleware() の make() -> terminate 連鎖が途切れ、後続
+     *     middleware の terminate() と $app->terminate() (defer() / terminating callback) が消える。
+     *   - queue: listener の遅延解決 (Dispatcher::createClassCallable) = dispatch 元 / worker のコードパス。
+     * singleton は「構築に失敗したインスタンス」をキャッシュしないので、一度失敗すると以後ずっと投げ続ける。
+     *
+     * Globals::globals() は initializer の例外を自前で catch するが、その内部 logWarning は LoggerHolder
+     * 経由でアプリの logger に落ちるため、logger 側が投げればここまで伝播する (他に assert(isset(...)) の
+     * AssertionError、Configurator::activate()/detach())。
+     *
+     * Noop フォールバックは api 側の実装 (OpenTelemetry\API\Metrics\Noop) なので SDK 非依存の契約を破らない。
+     * ログは出さない: HttpServerMetrics::terminate() と同じ理由で、Log 自体が新たな throw 源になる。
+     * 記録は黙って落ちる = 計装の失敗は telemetry の欠損として観測される (アプリの挙動は変えない)。
+     */
+    private static function meterProvider(): MeterProviderInterface
+    {
+        try {
+            return Globals::meterProvider();
+        } catch (Throwable) {
+            return new NoopMeterProvider;
         }
     }
 

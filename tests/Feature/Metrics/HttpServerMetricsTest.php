@@ -8,6 +8,7 @@ use Mockery;
 use OpenTelemetry\API\Metrics\HistogramInterface;
 use OpenTelemetry\API\Metrics\MeterInterface;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
+use OpenTelemetry\API\Metrics\Noop\NoopHistogram;
 use ReflectionProperty;
 use RuntimeException;
 use Sensyn\LaravelOTelSupport\Metrics\Http\HttpServerMetrics;
@@ -331,5 +332,65 @@ class HttpServerMetricsTest extends TestCase
         config(['otel-support.metrics.http.buckets' => ['oops']]);
 
         $this->assertInstanceOf(HttpServerMetrics::class, new HttpServerMetrics($this->meterProvider));
+    }
+
+    public function test_meter_resolution_failure_does_not_propagate_from_the_constructor(): void
+    {
+        // constructor は terminate() より着弾範囲が広い。この middleware は 1 リクエストで 2 回構築され
+        // (pipeline = Pipeline::carry の make / terminate = Kernel::terminateMiddleware の make)、singleton は
+        // 失敗した構築をキャッシュしないため、投げると全リクエストが 500 になった上に terminate 連鎖も
+        // 途切れる (= terminate() の catch が避けている事象を constructor が引き起こす)。
+        $attempts = 0;
+        $meterProvider = Mockery::mock(MeterProviderInterface::class);
+        $meterProvider->shouldReceive('getMeter')->andReturnUsing(function () use (&$attempts): MeterInterface {
+            $attempts++;
+            throw new RuntimeException('meter provider exploded');
+        });
+
+        $this->assertMiddlewareIsHarmless($meterProvider);
+        $this->assertSame(1, $attempts, 'constructor は getMeter() まで到達している必要がある。');
+    }
+
+    public function test_instrument_creation_failure_does_not_propagate_from_the_constructor(): void
+    {
+        // getMeter() は通っても createHistogram() (advisory の解釈など) で投げる余地は残る。
+        $attempts = 0;
+        $meter = Mockery::mock(MeterInterface::class);
+        $meter->shouldReceive('createHistogram')->andReturnUsing(function () use (&$attempts): HistogramInterface {
+            $attempts++;
+            throw new RuntimeException('instrument creation exploded');
+        });
+
+        $meterProvider = Mockery::mock(MeterProviderInterface::class);
+        $meterProvider->shouldReceive('getMeter')->andReturn($meter);
+
+        $this->assertMiddlewareIsHarmless($meterProvider);
+        $this->assertSame(1, $attempts, 'constructor は createHistogram() まで到達している必要がある。');
+    }
+
+    /**
+     * 壊れた MeterProvider でも構築 → handle() → terminate() が例外を出さず、histogram には Noop が
+     * 入っていることを確認する。
+     *
+     * Noop であることまで見るのは terminate() が Throwable を飲むため: フォールバックの代入を落とすと
+     * 「未初期化プロパティへのアクセス = Error」が terminate() の catch に飲まれて黙るので、
+     * 「例外が出ないこと」だけではガードの半分が抜けても気付けない。
+     */
+    private function assertMiddlewareIsHarmless(MeterProviderInterface $meterProvider): void
+    {
+        $middleware = new HttpServerMetrics($meterProvider);
+
+        $duration = new ReflectionProperty(HttpServerMetrics::class, 'duration');
+        $this->assertInstanceOf(
+            NoopHistogram::class,
+            $duration->getValue($middleware),
+            'instrument の構築に失敗したら Noop instrument に倒す必要がある (未初期化のままだと記録時に Error)。',
+        );
+
+        $request = Request::create('https://example.test/things', 'GET');
+        $response = new Response('', 200);
+
+        $middleware->handle($request, fn () => $response);
+        $middleware->terminate($request, $response);
     }
 }

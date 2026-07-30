@@ -7,6 +7,7 @@ use Illuminate\Http\Request;
 use Illuminate\Routing\Route;
 use OpenTelemetry\API\Metrics\HistogramInterface;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
+use OpenTelemetry\API\Metrics\Noop\NoopMeter;
 use OpenTelemetry\Context\Context;
 use OpenTelemetry\Context\ContextInterface;
 use Sensyn\LaravelOTelSupport\Metrics\Buckets;
@@ -39,19 +40,35 @@ class HttpServerMetrics
 
     public function __construct(MeterProviderInterface $meterProvider)
     {
-        $buckets = Buckets::fromConfig('otel-support.metrics.http.buckets', Buckets::DEFAULT_HTTP);
+        try {
+            $buckets = Buckets::fromConfig('otel-support.metrics.http.buckets', Buckets::DEFAULT_HTTP);
 
-        // MeterProvider は provider が container に bind する (Globals 依存は app 側に閉じる)。
-        // meter (instrumentation scope) 名と histogram 名は計装の identity。サービス名は resource の
-        // service.name で別途付くので、ここはモジュール名ベースの固定値にする (config 化しない)。
-        $this->duration = $meterProvider
-            ->getMeter('laravel-otel-support.metrics.http')
-            ->createHistogram(
-                'http.server.request.duration',
-                's',
-                'Duration of HTTP server requests',
-                ['ExplicitBucketBoundaries' => $buckets],
-            );
+            // MeterProvider は provider が container に bind する (Globals 依存は app 側に閉じる)。
+            // meter (instrumentation scope) 名と histogram 名は計装の identity。サービス名は resource の
+            // service.name で別途付くので、ここはモジュール名ベースの固定値にする (config 化しない)。
+            $this->duration = $meterProvider
+                ->getMeter('laravel-otel-support.metrics.http')
+                ->createHistogram(
+                    'http.server.request.duration',
+                    's',
+                    'Duration of HTTP server requests',
+                    ['ExplicitBucketBoundaries' => $buckets],
+                );
+        } catch (Throwable) {
+            // 構築の失敗も terminate() と同じくアプリに漏らさない。この middleware は 1 リクエストで 2 回
+            // 構築される (request 経路 = global stack 先頭の pipe である Pipeline::carry() の make()、
+            // terminate 経路 = Kernel::terminateMiddleware() の make()) 上に、singleton は失敗した構築を
+            // キャッシュしないため、投げると全リクエストが 500 になり、さらに terminate 連鎖が途切れて
+            // defer() 済み処理と terminating callback が黙って消える (terminate() が避けている事象そのもの)。
+            //
+            // 現実的なトリガは SDK ではなく config 側: Buckets::fromConfig() が不正値で出す Log::warning
+            // (channel 未定義 / handler が書き込み不能 / カスタム handler の throw) と facade root 未設定。
+            //
+            // フォールバックは config も logger も触らない Noop instrument にする (フォールバック自身が
+            // 新たな throw 源にならないこと)。プロパティは非 null のまま埋まるので record 側は変更不要。
+            // ログは出さない (terminate() と同じ理由: Log 自体が throw 源で、hot path では増幅する)。
+            $this->duration = (new NoopMeter)->createHistogram('http.server.request.duration');
+        }
     }
 
     public function handle(Request $request, Closure $next): Response
