@@ -18,6 +18,17 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - dependencies
+    # laravel/pint is deliberately held below 1.21.0. The `lowest` CI leg resolves dev tools with
+    # --prefer-lowest on PHP 8.1, and from 1.21.0 on Pint itself requires PHP ^8.2 - so a floor that
+    # reaches it makes that leg unresolvable. The floor cannot go lower than 1.18.1 either (1.18.0
+    # cannot run at all), which leaves 1.18.1-1.20.0 as the only workable range and no room for a
+    # major or minor bump. Patch bumps stay enabled. Temporary: drop this entry when the package
+    # stops supporting PHP 8.1. Details in CONTRIBUTING.md ("Ground rules").
+    ignore:
+      - dependency-name: laravel/pint
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
     groups:
       # Declared before the laravel group on purpose: laravel/pint is a formatter with its own
       # release cadence and has nothing to do with a framework release, but "laravel/*" would
