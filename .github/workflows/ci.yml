@@ -31,11 +31,11 @@ jobs:
         # picks the Testbench major, while its *floor* stays under composer.json's control.
         #
         # composer.json declares `php: ^8.1` with no upper bound, so 8.5 is allowed and has to be
-        # covered: the first consumer (datastore-api) requires `php ^8.4.1`. That leg is Laravel 13
-        # only, on purpose. Nobody runs the newest PHP on a framework branch that is already past
-        # its security window (see the advisory escape hatch below), and Laravel 10 on PHP 8.5
-        # emits 18 deprecations from its own vendor tree - noise this package cannot fix, in a
-        # combination no consumer has.
+        # covered: our own applications are already on `php ^8.4.1`. That leg is Laravel 13 only, on
+        # purpose. Nobody runs the newest PHP on a framework branch that is already past its security
+        # window (see the advisory escape hatch below), and Laravel 10 on PHP 8.5 emits 18
+        # deprecations from its own vendor tree - noise this package cannot fix, in a combination no
+        # consumer has.
         include:
           - { php: '8.1', laravel: '10.*', deps: lowest }
           - { php: '8.2', laravel: '10.*', deps: highest }
@@ -145,6 +145,27 @@ jobs:
 
       - name: Run Pint
         run: vendor/bin/pint --test
+
+  runtime-dependencies:
+    name: Runtime code depends on the OTel API only
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # open-telemetry/sdk is a dev dependency, so an accidental SDK import in src/ passes every other
+      # job: PHPStan and PHPUnit both analyse and run with the SDK present in vendor/. It only breaks
+      # in a consuming application that has no SDK installed - as a fatal error while the service
+      # provider registers, i.e. the application does not start. This job is the gate for that.
+      # open-telemetry/sem-conv is covered too: it ships as a dependency of the SDK, which is why the
+      # semantic-convention names and values in src/ are string literals.
+      - name: Assert src/ and config/ do not reference the OTel SDK
+        run: |
+          if grep -rnE 'OpenTelemetry\\(SDK|Contrib)' src config; then
+            echo "::error::Runtime code may only depend on open-telemetry/api and open-telemetry/context (see CONTRIBUTING.md)."
+            exit 1
+          fi
+          echo "OK: no SDK or Contrib references in runtime code."
 
   composer-validate:
     name: Validate composer.json
