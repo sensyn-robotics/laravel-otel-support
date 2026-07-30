@@ -81,8 +81,10 @@ class MetricsServiceProvider extends ServiceProvider
         //     Application::handleRequest、Octane も ApplicationFactory::getBootstrappers が bootstrapWith の
         //     前に HTTP kernel を make する)。
         //   - console 経路: 未解決なので解決フックに預け、実際に HTTP kernel が作られた時だけ prepend。
-        // runningInConsole() で分岐しないのは、Octane では HTTP リクエスト処理中も PHP_SAPI=cli で
-        // true になり、HTTP metrics が丸ごと無効化されてしまうため。
+        // runningInConsole() / PHP_SAPI で分岐しないのは、Octane 下の実行文脈をどちらの signal でも
+        // 判定できないため。ここで効くのは PHP_SAPI 側で、Swoole / RoadRunner の Octane worker は HTTP
+        // リクエストの処理中も PHP_SAPI='cli' なので、console 扱いで登録を落とすと HTTP metrics が丸ごと
+        // 無効化される。signal ごとの事実関係は WorkerFlusher::subscribeLazily() の docblock に集約。
         if ($this->app->resolved(Kernel::class)) {
             $this->prependMiddleware($this->app->make(Kernel::class));
 

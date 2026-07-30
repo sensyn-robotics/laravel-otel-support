@@ -89,8 +89,16 @@ class WorkerFlusher
      * (Dispatcher::createClassCallable)。おかげで
      *   - queue も Octane も使わないプロセス (素の FPM リクエスト / 一般の artisan) では WorkerFlusher が
      *     生成されず、Globals (= SDK autoload) にも触らない。
-     *   - 逆に SAPI に依らず配線できる。runningInConsole() で分岐すると FrankenPHP の Octane worker
-     *     (PHP_SAPI='frankenphp') では false になり、リクエスト境界の flush が丸ごと配線されない。
+     *   - 逆に実行文脈の判定に依らず配線できる。「長命 worker か」を runningInConsole() や PHP_SAPI から
+     *     判定する形にすると、Octane では以下のとおりどちらの signal でも間違える (この事実の帰結は
+     *     HTTP middleware を登録する MetricsServiceProvider 側にもある):
+     *       - runningInConsole(): Octane は worker の bootstrap で $_ENV['APP_RUNNING_IN_CONSOLE'] = false
+     *         を置く (octane/bin/bootstrap.php。swoole / roadrunner / frankenphp の 3 経路すべてが通る)。
+     *         Application::runningInConsole() はこの env を PHP_SAPI より先に見るので、Octane worker は
+     *         server 実装に依らず false = 長命 worker なのに「console でない」と申告する。
+     *       - PHP_SAPI: Swoole / RoadRunner の worker は artisan (octane:start) から起動した CLI プロセス
+     *         なので、HTTP リクエストの処理中も 'cli' のまま。一方 FrankenPHP はバイナリに埋め込まれた
+     *         SAPI で動くので 'frankenphp' になる。つまり 'cli' 判定でも文脈は決まらない。
      *
      * 解決は発火ごとに走るので、dirty フラグ ($pending) をイベント間で共有するには WorkerFlusher が
      * singleton として bind されている必要がある (OTelSupportServiceProvider::register)。同じ理由で、
