@@ -11,6 +11,7 @@ use OpenTelemetry\API\Metrics\MeterProviderInterface;
 use OpenTelemetry\API\Metrics\Noop\NoopHistogram;
 use ReflectionProperty;
 use RuntimeException;
+use Sensyn\LaravelOTelSupport\Metrics\Buckets;
 use Sensyn\LaravelOTelSupport\Metrics\Http\HttpServerMetrics;
 use Sensyn\LaravelOTelSupport\Tests\Support\RecordsMetrics;
 use Sensyn\LaravelOTelSupport\Tests\TestCase;
@@ -324,6 +325,52 @@ class HttpServerMetricsTest extends TestCase
         $middleware->terminate($request, $response);
 
         $this->assertTrue($recorded, 'terminate() は record() まで到達している必要がある (到達前に return していないこと)。');
+    }
+
+    public function test_duration_is_recorded_in_seconds(): void
+    {
+        // 単位 (s) は公開している契約で、値はその単位で記録されている必要がある。秒とミリ秒の
+        // 取り違えは OTel/Prometheus の定番事故で、しかも属性・件数のテストでは一切検知できない
+        // (semconv の bucket 境界は秒なので、1000 倍ずれると全観測が +Inf bucket に落ちる)。
+        $request = Request::create('https://example.test/things', 'GET');
+        $response = new Response('', 200);
+        $middleware = new HttpServerMetrics($this->meterProvider);
+
+        $middleware->handle($request, fn () => $response);
+        usleep(5_000);
+        $middleware->terminate($request, $response);
+
+        $metric = $this->collectMetrics()['http.server.request.duration'];
+        $this->assertSame('s', $metric->unit);
+
+        // 5ms スリープを挟んだ 1 リクエストぶん。秒なら [0.005, 1) に収まり、ミリ秒 (1000 倍) なら 5 以上、
+        // 単位を取り違えた縮小方向なら 0.005 未満になる。
+        $sum = $this->histogramSum($metric);
+        $this->assertGreaterThanOrEqual(0.005, $sum, '記録値が秒として小さすぎる (単位の取り違え?)。');
+        $this->assertLessThan(1.0, $sum, '記録値が秒として大きすぎる (ミリ秒で記録している?)。');
+    }
+
+    public function test_configured_buckets_reach_the_histogram(): void
+    {
+        // 設定した境界が instrument の advisory (ExplicitBucketBoundaries) まで届かないと、SDK 既定の
+        // 境界 ([0, 5, 10, ..., 1000]) に黙って落ちる = OTEL_METRICS_HTTP_BUCKETS が無視される。
+        // config キー名の誤りもここで落ちる。
+        config(['otel-support.metrics.http.buckets' => [0.25, 0.75]]);
+
+        $this->runMiddleware(Request::create('https://example.test/things', 'GET'), new Response('', 200));
+
+        $this->assertSame([0.25, 0.75], $this->histogramBounds($this->collectMetrics()['http.server.request.duration']));
+    }
+
+    public function test_default_buckets_are_the_semconv_recommendation(): void
+    {
+        // config を触らない既定経路。同梱 config の既定値が histogram まで届くこと。
+        $this->runMiddleware(Request::create('https://example.test/things', 'GET'), new Response('', 200));
+
+        $this->assertSame(
+            Buckets::DEFAULT_HTTP,
+            $this->histogramBounds($this->collectMetrics()['http.server.request.duration']),
+        );
     }
 
     public function test_invalid_buckets_do_not_throw(): void
