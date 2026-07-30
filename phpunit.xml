@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         cacheDirectory=".phpunit.cache"
+         colors="true"
+         stopOnFailure="false">
+    <testsuites>
+        <testsuite name="laravel-otel-support">
+            <directory suffix="Test.php">tests</directory>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory suffix=".php">src</directory>
+        </include>
+    </source>
+    <php>
+        <env name="APP_ENV" value="testing"/>
+        <!--
+            The instrumentation only depends on the OTel API, so the tests build their own
+            in-memory SDK providers. Keep the SDK autoloader off (force, so a developer's
+            exported value cannot leak in) to make Globals::*Provider() resolve to Noop.
+        -->
+        <env name="OTEL_PHP_AUTOLOAD_ENABLED" value="false" force="true"/>
+    </php>
+</phpunit>

@@ -1,0 +1,22 @@
+# Composer
+/vendor/
+
+# This is a library: the lock file must not be committed so that consuming
+# applications resolve their own dependency graph, and so that the CI matrix
+# can resolve Laravel 10 / 11 / 12 / 13 legs from composer.json alone.
+/composer.lock
+
+# PHPUnit
+/.phpunit.cache/
+/.phpunit.result.cache
+/build/
+/coverage/
+
+# PHPStan
+/.phpstan.cache/
+
+# Editors / OS
+/.idea/
+/.vscode/
+.DS_Store
+.php-cs-fixer.cache

@@ -1,0 +1,90 @@
+{
+    "name": "sensyn-robotics/laravel-otel-support",
+    "description": "OpenTelemetry metrics instrumentation and queue-worker signal flushing for Laravel, complementing opentelemetry-auto-laravel and the OTel SDK autoloader.",
+    "type": "library",
+    "keywords": [
+        "laravel",
+        "opentelemetry",
+        "otel",
+        "observability",
+        "instrumentation",
+        "metrics",
+        "queue"
+    ],
+    "license": "Apache-2.0",
+    "homepage": "https://github.com/sensyn-robotics/laravel-otel-support",
+    "authors": [
+        {
+            "name": "Sensyn Robotics, Inc."
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/sensyn-robotics/laravel-otel-support/issues",
+        "source": "https://github.com/sensyn-robotics/laravel-otel-support"
+    },
+    "require": {
+        "php": "^8.1",
+        "illuminate/contracts": "^10.0 || ^11.0 || ^12.0 || ^13.0",
+        "illuminate/http": "^10.0 || ^11.0 || ^12.0 || ^13.0",
+        "illuminate/queue": "^10.0 || ^11.0 || ^12.0 || ^13.0",
+        "illuminate/routing": "^10.0 || ^11.0 || ^12.0 || ^13.0",
+        "illuminate/support": "^10.0 || ^11.0 || ^12.0 || ^13.0",
+        "open-telemetry/api": "^1.9",
+        "open-telemetry/context": "^1.4",
+        "symfony/http-foundation": "^6.4 || ^7.0 || ^8.0"
+    },
+    "require-dev": {
+        "guzzlehttp/guzzle": "^7.8",
+        "laravel/pint": "^1.18",
+        "mockery/mockery": "^1.5.1",
+        "open-telemetry/sdk": "^1.15",
+        "orchestra/testbench": "^8.37 || ^9.17 || ^10.11 || ^11.1",
+        "phpstan/phpstan": "^2.2",
+        "phpstan/phpstan-mockery": "^2.0",
+        "phpunit/phpunit": "^10.5 || ^11.5 || ^12.0 || ^13.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Sensyn\\LaravelOTelSupport\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Sensyn\\LaravelOTelSupport\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Sensyn\\LaravelOTelSupport\\OTelSupportServiceProvider"
+            ]
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "analyse": "phpstan analyse --memory-limit=1G",
+        "format": "pint",
+        "format:check": "pint --test",
+        "check": [
+            "@format:check",
+            "@analyse",
+            "@test"
+        ]
+    },
+    "scripts-descriptions": {
+        "test": "Run the PHPUnit test suite.",
+        "analyse": "Run PHPStan static analysis.",
+        "format": "Format the code with Laravel Pint.",
+        "format:check": "Check formatting with Laravel Pint without writing changes.",
+        "check": "Run format check, static analysis and tests (what CI runs)."
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "php-http/discovery": false,
+            "tbachert/spi": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

@@ -1,0 +1,14 @@
+# Normalise line endings in the repository to LF.
+* text=auto eol=lf
+
+# Consuming applications install this package from a Composer VCS repository, which means
+# Composer downloads the dist archive GitHub generates with `git archive`. Everything that
+# only matters while developing the package is kept out of that archive so the consumer's
+# vendor/ tree stays minimal. README.md, CONTRIBUTING.md (both are linked from the other)
+# and LICENSE are deliberately shipped.
+/.github/           export-ignore
+/tests/             export-ignore
+/.gitattributes     export-ignore
+/.gitignore         export-ignore
+/phpunit.xml        export-ignore
+/phpstan.neon       export-ignore
