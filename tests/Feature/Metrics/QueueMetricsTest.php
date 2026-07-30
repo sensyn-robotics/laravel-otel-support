@@ -18,11 +18,13 @@ use OpenTelemetry\API\Metrics\Noop\NoopCounter;
 use OpenTelemetry\API\Metrics\Noop\NoopHistogram;
 use ReflectionProperty;
 use RuntimeException;
+use Sensyn\LaravelOTelSupport\Metrics\Buckets;
 use Sensyn\LaravelOTelSupport\Metrics\Queue\QueueMetrics;
 use Sensyn\LaravelOTelSupport\Tests\Support\FakeQueuedJob;
 use Sensyn\LaravelOTelSupport\Tests\Support\MakesQueueEvents;
 use Sensyn\LaravelOTelSupport\Tests\Support\RecordsMetrics;
 use Sensyn\LaravelOTelSupport\Tests\TestCase;
+use stdClass;
 
 class QueueMetricsTest extends TestCase
 {
@@ -70,19 +72,96 @@ class QueueMetricsTest extends TestCase
     {
         $dispatcher = $this->subscribedDispatcher();
 
-        $dispatcher->dispatch($this->jobQueued(self::CONN, 'id-1', new FakeQueuedJob));
+        // 宛先を明示した push。11+ はイベント側、10 は job 側から同じ 'emails' を読む。
+        $dispatcher->dispatch($this->jobQueued(self::CONN, 'id-1', new FakeQueuedJob, 'emails'));
 
         $metrics = $this->collectMetrics();
         $this->assertArrayHasKey('messaging.client.sent.messages', $metrics);
 
         $sent = $metrics['messaging.client.sent.messages'];
         $this->assertSame(1, $this->counterValue($sent));
+        // semconv の messaging.client.sent.messages の属性表どおり: Required の messaging.operation.name /
+        // messaging.system が付き、この metric の属性ではない messaging.operation.type は付かない。
         $this->assertSame([
             'messaging.system' => 'redis',
             'messaging.destination.name' => 'emails',
-            'messaging.operation.type' => 'send',
+            'messaging.operation.name' => 'send',
             'laravel.queue.job.name' => FakeQueuedJob::class,
         ], $this->attributesOf($sent));
+        $this->assertSame('{message}', $metrics['messaging.client.sent.messages']->unit);
+    }
+
+    public function test_sqs_driver_is_reported_with_the_semconv_system_value(): void
+    {
+        // semconv の well-known 値が存在する driver は素通しにできない (MUST)。他言語 auto-instrumentation は
+        // 同じブローカーに aws_sqs を出すので、'sqs' のままだと同一 metric が 2 系列に分裂する。
+        config(['queue.connections.otel-sqs.driver' => 'sqs']);
+        $dispatcher = $this->subscribedDispatcher();
+        $job = $this->consumerJob(FakeQueuedJob::class);
+
+        $dispatcher->dispatch($this->jobQueued('otel-sqs', 'id-1', new FakeQueuedJob, 'emails'));
+        $dispatcher->dispatch(new JobProcessing('otel-sqs', $job));
+        $dispatcher->dispatch(new JobProcessed('otel-sqs', $job));
+
+        $metrics = $this->collectMetrics();
+        $this->assertSame('aws_sqs', $this->attributesOf($metrics['messaging.client.sent.messages'])['messaging.system']);
+        // 終端側 (finished / duration) も同じ写像を通す。
+        $this->assertSame('aws_sqs', $this->attributesOf($metrics['laravel.queue.job.finished'])['messaging.system']);
+        $this->assertSame('aws_sqs', $this->attributesOf($metrics['laravel.queue.job.duration'])['messaging.system']);
+    }
+
+    public function test_driver_without_a_semconv_value_is_passed_through(): void
+    {
+        // well-known 値が無い driver (redis / database / beanstalkd) はカスタム値として driver 名を出す。
+        $dispatcher = $this->subscribedDispatcher();
+
+        $dispatcher->dispatch($this->jobQueued(self::CONN, 'id-1', new FakeQueuedJob, 'emails'));
+
+        $attrs = $this->attributesOf($this->collectMetrics()['messaging.client.sent.messages']);
+        $this->assertSame('redis', $attrs['messaging.system']);
+    }
+
+    public function test_enqueue_without_an_explicit_queue_uses_the_connection_default(): void
+    {
+        // onQueue() 等でキューを指定しない dispatch。実際の宛先は connection 既定のキューなので、
+        // 'default' 固定にすると consumer 側 ($job->getQueue()) と結合できなくなる。
+        config(['queue.connections.'.self::CONN.'.queue' => 'app-jobs']);
+        $dispatcher = $this->subscribedDispatcher();
+
+        // 宛先を持たない job (FakeQueuedJob は $queue を持つので使えない) を dispatch する。
+        $dispatcher->dispatch($this->jobQueued(self::CONN, 'id-1', new stdClass));
+
+        $attrs = $this->attributesOf($this->collectMetrics()['messaging.client.sent.messages']);
+        $this->assertSame('app-jobs', $attrs['messaging.destination.name']);
+    }
+
+    public function test_enqueue_falls_back_to_default_when_the_connection_has_no_queue(): void
+    {
+        // 既定キュー名が config に無い connection (テストの既定状態) では 'default' に倒す。
+        $dispatcher = $this->subscribedDispatcher();
+
+        $dispatcher->dispatch($this->jobQueued(self::CONN, 'id-1', new stdClass));
+
+        $attrs = $this->attributesOf($this->collectMetrics()['messaging.client.sent.messages']);
+        $this->assertSame('default', $attrs['messaging.destination.name']);
+    }
+
+    public function test_enqueue_prefers_the_queue_carried_by_the_event(): void
+    {
+        // Queue::pushOn('high', $job) 相当: 呼び出し側の指定が job 自身の宛先 (FakeQueuedJob::$queue =
+        // 'emails') を上書きする。Laravel 11+ はイベントが実際の宛先 'high' を持つのでそれを使い、
+        // イベントに宛先が無い 10 では job 側の 'emails' が唯一の手掛かりになる。
+        config(['queue.connections.'.self::CONN.'.queue' => 'app-jobs']);
+        $dispatcher = $this->subscribedDispatcher();
+
+        $dispatcher->dispatch($this->jobQueued(self::CONN, 'id-1', new FakeQueuedJob, 'high'));
+
+        $attrs = $this->attributesOf($this->collectMetrics()['messaging.client.sent.messages']);
+        $this->assertSame(
+            $this->jobQueuedCarriesQueue() ? 'high' : 'emails',
+            $attrs['messaging.destination.name'],
+            'イベントが宛先を持つ版ではイベント側を優先する必要がある (job 側の値では push 先とずれる)。',
+        );
     }
 
     public function test_successful_terminal_has_no_error_type_and_records_duration(): void
@@ -211,6 +290,54 @@ class QueueMetricsTest extends TestCase
         $metrics = $this->collectMetrics();
         $finished = $metrics['laravel.queue.job.finished'] ?? null;
         $this->assertTrue($finished === null || $this->dataPoints($finished) === []);
+    }
+
+    public function test_terminal_duration_is_recorded_in_seconds(): void
+    {
+        // 単位 (s / {job}) は公開している契約で、値はその単位で記録されている必要がある。属性と件数の
+        // テストでは桁が 1000 倍ずれる退行 (秒とミリ秒の取り違え) を一切検知できない。
+        $dispatcher = $this->subscribedDispatcher();
+        $job = $this->consumerJob(FakeQueuedJob::class);
+
+        $dispatcher->dispatch(new JobProcessing(self::CONN, $job));
+        usleep(5_000);
+        $dispatcher->dispatch(new JobProcessed(self::CONN, $job));
+
+        $metrics = $this->collectMetrics();
+        $this->assertSame('{job}', $metrics['laravel.queue.job.finished']->unit);
+        $this->assertSame('s', $metrics['laravel.queue.job.duration']->unit);
+
+        $sum = $this->histogramSum($metrics['laravel.queue.job.duration']);
+        $this->assertGreaterThanOrEqual(0.005, $sum, '記録値が秒として小さすぎる (単位の取り違え?)。');
+        $this->assertLessThan(1.0, $sum, '記録値が秒として大きすぎる (ミリ秒で記録している?)。');
+    }
+
+    public function test_configured_duration_buckets_reach_the_histogram(): void
+    {
+        // 設定した境界が instrument の advisory まで届かないと SDK 既定の境界に黙って落ちる
+        // (= OTEL_METRICS_QUEUE_DURATION_BUCKETS が無視される)。config キー名の誤りもここで落ちる。
+        config(['otel-support.metrics.queue.duration_buckets' => [0.25, 0.75]]);
+        $dispatcher = $this->subscribedDispatcher();
+        $job = $this->consumerJob(FakeQueuedJob::class);
+
+        $dispatcher->dispatch(new JobProcessing(self::CONN, $job));
+        $dispatcher->dispatch(new JobProcessed(self::CONN, $job));
+
+        $this->assertSame([0.25, 0.75], $this->histogramBounds($this->collectMetrics()['laravel.queue.job.duration']));
+    }
+
+    public function test_default_duration_buckets_are_the_semconv_recommendation(): void
+    {
+        $dispatcher = $this->subscribedDispatcher();
+        $job = $this->consumerJob(FakeQueuedJob::class);
+
+        $dispatcher->dispatch(new JobProcessing(self::CONN, $job));
+        $dispatcher->dispatch(new JobProcessed(self::CONN, $job));
+
+        $this->assertSame(
+            Buckets::DEFAULT_QUEUE,
+            $this->histogramBounds($this->collectMetrics()['laravel.queue.job.duration']),
+        );
     }
 
     public function test_invalid_buckets_do_not_throw(): void

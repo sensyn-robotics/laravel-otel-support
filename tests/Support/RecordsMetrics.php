@@ -91,12 +91,41 @@ trait RecordsMetrics
     /** histogram の先頭 data point の記録件数を返す。 */
     private function histogramCount(Metric $metric): int
     {
+        return $this->histogramPoint($metric)->count;
+    }
+
+    /**
+     * histogram の先頭 data point の記録値の合計を返す。
+     *
+     * 件数や属性だけを見るテストは「値そのもの」の退行 (秒とミリ秒の取り違え等、桁が 1000 倍ずれる
+     * OTel/Prometheus の定番事故) を検知できないので、記録値を読む口を用意する。
+     */
+    private function histogramSum(Metric $metric): float|int
+    {
+        return $this->histogramPoint($metric)->sum;
+    }
+
+    /**
+     * histogram の先頭 data point の bucket 境界を返す。
+     *
+     * 設定値が instrument の advisory (ExplicitBucketBoundaries) まで届いているかは SDK 側の集計結果に
+     * しか現れない (届かなければ SDK 既定の [0, 5, 10, ..., 1000] に黙って落ちる)。
+     *
+     * @return list<float|int>
+     */
+    private function histogramBounds(Metric $metric): array
+    {
+        return $this->histogramPoint($metric)->explicitBounds;
+    }
+
+    private function histogramPoint(Metric $metric): HistogramDataPoint
+    {
         $point = $this->firstDataPoint($metric);
         if (! $point instanceof HistogramDataPoint) {
             Assert::fail(sprintf('Metric "%s" has no HistogramDataPoint (not a histogram?).', $metric->name));
         }
 
-        return $point->count;
+        return $point;
     }
 
     /**

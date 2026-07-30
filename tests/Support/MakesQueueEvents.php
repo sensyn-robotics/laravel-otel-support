@@ -18,17 +18,30 @@ use ReflectionClass;
  */
 trait MakesQueueEvents
 {
-    private function jobQueued(string $connection, string $id, object $job, string $payload = '{}'): JobQueued
-    {
-        // Laravel 11+ はイベント自身が queue 名を持つ。job 側の宛先 (FakeQueuedJob::$queue) と
-        // 同じ値を渡し、どちらの分岐でも producer の宛先属性が同じになるようにする。
-        $queue = isset($job->queue) && is_string($job->queue) ? $job->queue : null;
-
+    /**
+     * $queue は Laravel 11+ の JobQueued::$queue にそのまま入る (= push の宛先引数。呼び出し側が
+     * キューを指定しなければ本番でも null)。job 自身が持つ宛先 ($job->queue) から導出しないのが重要:
+     * 導出すると 10 の分岐と 11+ の分岐に同じ値しか流れず、producer が「イベントの宛先」と
+     * 「job の宛先」のどちらを読んでいるのか構造的に判別できないテストになる。
+     */
+    private function jobQueued(
+        string $connection,
+        string $id,
+        object $job,
+        ?string $queue = null,
+        string $payload = '{}',
+    ): JobQueued {
         $class = new ReflectionClass(JobQueued::class);
-        $arguments = ($class->getConstructor()?->getNumberOfParameters() ?? 0) >= 6
+        $arguments = $this->jobQueuedCarriesQueue()
             ? [$connection, $queue, $id, $job, $payload, null]
             : [$connection, $id, $job, $payload];
 
         return $class->newInstanceArgs($arguments);
+    }
+
+    /** 走っている Laravel の JobQueued がイベント自身に宛先キュー名を持つか (11+ = true / 10 = false)。 */
+    private function jobQueuedCarriesQueue(): bool
+    {
+        return ((new ReflectionClass(JobQueued::class))->getConstructor()?->getNumberOfParameters() ?? 0) >= 6;
     }
 }

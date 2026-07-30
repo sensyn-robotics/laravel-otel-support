@@ -34,6 +34,34 @@ takes care of merging and publishing the config in one place (`metrics.*` in
 - The meter (instrumentation scope) names are `laravel-otel-support.metrics.http` and
   `laravel-otel-support.metrics.queue`.
 - Per metric:
+  - `messaging.client.sent.messages` carries the attribute set semconv specifies for that metric:
+    `messaging.operation.name` (`send`) and `messaging.system` (both Required), plus
+    `messaging.destination.name` (Conditionally Required) and the package's own
+    `laravel.queue.job.name`. `messaging.operation.type` is deliberately **not** emitted: it is not
+    part of this metric's attribute table (it belongs to the spans and to
+    `messaging.client.operation.duration`), and adding it would make the series diverge from the
+    same metric emitted by other languages' instrumentation.
+    - `messaging.system` is the Laravel queue driver mapped onto semconv's well-known values, which
+      today means `sqs` → `aws_sqs`. Drivers with no well-known value (`redis`, `database`,
+      `beanstalkd`, `sync`, …) are passed through as the custom value semconv permits.
+    - `messaging.destination.name` is the queue the message was really pushed to, so that it joins
+      with the consumer-side attribute on `laravel.queue.job.*` (queue backlog =
+      `sum(sent) - sum(finished)` per queue). It comes from `JobQueued::$queue` on Laravel 11+, and
+      falls back to the connection's default queue (`queue.connections.*.queue`) when the caller
+      named no queue. On **Laravel 10 the event carries no queue name**, so the job's own
+      destination (`onQueue()` / a `$queue` property) is used instead and a `Queue::pushOn()` that
+      contradicts it cannot be seen.
+  - `http.server.request.duration`
+    - carries `http.route` (the route template) only when routing matched; the raw path is never used.
+    - `http.request.method` only ever holds a semconv known method or `_OTHER`, so the number of series
+      stays bounded no matter what a client sends. Requests whose method cannot be determined at all (a
+      malformed override such as `_method=FOO-BAR` makes Symfony's `getMethod()` throw) are recorded as
+      `_OTHER` too. `http.request.method_original` is deliberately omitted: it would bring the unbounded
+      cardinality straight back.
+    - A request goes uncounted in the rare case where collecting the rest of its attributes fails - for
+      instance `getScheme()` raising `ConflictingHeadersException` when a trusted `Forwarded` header
+      contradicts `X-Forwarded-Proto`. The instrumentation never lets its own failure escape into the
+      application's `terminate` chain, and it does not invent an attribute value either.
   - Every queue metric carries the job class as `laravel.queue.job.name`.
   - `laravel.queue.job.finished`
     - carries `laravel.queue.job.retried` (bool, `attempts > 1`).
@@ -50,6 +78,25 @@ takes care of merging and publishing the config in one place (`metrics.*` in
   `failed_jobs` is registered *after* ours on `JobFailed` — so the instrumentation never lets its own
   failure escape, and it never logs one either. See
   [the fail-open contract](../../README.md#the-instrumentation-never-breaks-the-application).
+
+## Semantic conventions
+
+**The names, attribute keys and attribute values above follow OpenTelemetry semantic conventions
+`1.38.0`.** That version is the reference point for judging whether a change is breaking; without it
+pinned in writing, the metric contract would sit outside this package's versioning.
+
+The values are written as plain string literals in `src/`. `open-telemetry/sem-conv` is a dependency of
+`open-telemetry/sdk`, which this package may not require at runtime (see
+[CONTRIBUTING.md](../../CONTRIBUTING.md)), so the constants are not available to us — when the pinned
+version moves, the literals have to be updated by hand together with this section.
+
+Policy for following upstream:
+
+- The messaging conventions are still **Development** stability, so upstream renames of keys or values
+  are expected. Adopting one is a **breaking change for the consumer's dashboards and alert rules**
+  even though no PHP API changes, so it ships in a minor bump (a major from 1.0 on) and never in a
+  patch release — see the versioning rules in [CONTRIBUTING.md](../../CONTRIBUTING.md).
+- Where semconv offers no equivalent, the `laravel.*` names are ours and are versioned the same way.
 
 ## Registration
 

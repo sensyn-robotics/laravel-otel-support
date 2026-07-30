@@ -24,6 +24,11 @@ use Throwable;
  * - enqueue 数は semconv の意味と一致するので semconv 名 messaging.client.sent.messages。
  * - 終端 (retry 込みの最終 成功/失敗) は semconv の per-delivery と意味が違うので Laravel ドメイン名
  *   laravel.queue.job.*。成功/失敗は finished を error.type の有無で割る。
+ *
+ * 準拠する semconv のバージョンと属性値の更新方針は src/Metrics/README.md を参照 (属性値は直書き:
+ * open-telemetry/sem-conv は SDK 側の依存なので runtime から require できない)。
+ *
+ * @internal MetricsServiceProvider が listener として登録する。消費側アプリ向けの API ではない。
  */
 class QueueMetrics
 {
@@ -41,6 +46,25 @@ class QueueMetrics
         JobProcessed::class => 'recordProcessed',
         JobFailed::class => 'recordFailed',
         JobExceptionOccurred::class => 'forgetStart',
+    ];
+
+    /**
+     * Laravel の queue driver 名 => semconv の well-known な messaging.system 値。
+     *
+     * semconv は messaging.system を open enum と定め「well-known 値のどれかが当てはまるならその値を
+     * 使う (MUST)、当てはまらなければカスタム値でよい (MAY)」としている。Laravel の driver 名のうち
+     * well-known 値を持つのは sqs だけで (1.38.0 の well-known 値は activemq / aws.sns / aws_sqs /
+     * eventgrid / eventhubs / servicebus / gcp_pubsub / jms / kafka / pulsar / rabbitmq / rocketmq)、
+     * redis / database / beanstalkd / sync には対応値が無いので driver 名をそのままカスタム値として出す。
+     * 逆に kafka / rabbitmq 等の名前を持つサードパーティ driver は素通しで well-known 値に一致する。
+     *
+     * 値を直書きするのは open-telemetry/sem-conv が SDK 側の依存で、「runtime は api / context のみ」の
+     * 契約では require できないため (準拠バージョンと更新方針は src/Metrics/README.md)。
+     *
+     * @var array<string, string>
+     */
+    private const SEMCONV_SYSTEM = [
+        'sqs' => 'aws_sqs',
     ];
 
     private CounterInterface $sent;
@@ -197,12 +221,22 @@ class QueueMetrics
         }
     }
 
+    /**
+     * semconv の messaging.client.sent.messages の属性表に合わせる:
+     * Required = {messaging.operation.name, messaging.system}、Conditionally Required に
+     * messaging.destination.name。messaging.operation.type は**この metric の属性ではない**
+     * (span と messaging.client.operation.duration 側の属性) ので付けない。付けると他言語 SDK の
+     * 同名 metric とラベル集合が食い違い、同じ系列が分裂する。
+     *
+     * messaging.operation.name は「system 固有の操作名」で send / schedule / enqueue 等が例示値。
+     * Laravel の enqueue は 'send' とする。
+     */
     private function doRecordEnqueued(JobQueued $e): void
     {
         $this->sent->add(1, [
-            'messaging.system' => $this->driver($e->connectionName),
+            'messaging.system' => $this->system($e->connectionName),
             'messaging.destination.name' => $this->producerQueue($e),
-            'messaging.operation.type' => 'send',
+            'messaging.operation.name' => 'send',
             'laravel.queue.job.name' => $this->producerJobName($e),
         ]);
     }
@@ -265,7 +299,7 @@ class QueueMetrics
         // histogram にも渡す共通属性は低カーディナリティのみ (classic histogram は bucket×属性で series 増)。
         // job 名はクラス数ぶんの有界カーディナリティなので histogram にも付けてよい。
         $attrs = [
-            'messaging.system' => $driver,
+            'messaging.system' => $this->toSemconvSystem($driver),
             'messaging.destination.name' => (string) $job->getQueue(),
             'laravel.queue.job.name' => (string) $job->resolveName(),
         ];
@@ -293,23 +327,62 @@ class QueueMetrics
         return (string) ($job->uuid() ?? $job->getJobId());
     }
 
+    /** messaging.system (= driver を semconv の well-known 値に写したもの)。 */
+    private function system(mixed $connection): string
+    {
+        return $this->toSemconvSystem($this->driver($connection));
+    }
+
+    private function toSemconvSystem(string $driver): string
+    {
+        return self::SEMCONV_SYSTEM[$driver] ?? $driver;
+    }
+
     private function driver(mixed $connection): string
     {
         // config() helper (illuminate/foundation) は使わない (理由は Buckets::fromConfig のコメント参照)。
         return (string) Config::get('queue.connections.'.((string) $connection).'.driver', 'unknown');
     }
 
+    /**
+     * producer 側の messaging.destination.name。consumer 側 (recordTerminal の $job->getQueue()) と
+     * 同じキュー名になることが要件 = 両者を結合してキュー単位のバックログを見られること。
+     *
+     * JobQueued の扱いは Laravel のバージョンで違う: 11.x 以降のイベントは push した宛先そのものを
+     * $queue に持ち (Queue::enqueueUsing に渡された引数。呼び出し側がキューを指定しなければ null)、
+     * 10.x のイベントは $queue を持たない。プロパティの有無で分岐する。
+     */
     private function producerQueue(JobQueued $e): string
     {
-        // JobQueued の queue 名は Laravel のバージョンで扱いが違う: 10.x のイベントは $queue を持たず、
-        // 11.x 以降は $queue プロパティがある。ここでは全バージョン共通で、job が onQueue 等で
-        // 自身に持っていれば取る best-effort に留める (無ければ 'default')。
+        // property_exists() / $e->queue の直接アクセスは、Laravel 10 と 11+ のどちらかで静的解析が
+        // 壊れる (10 では未定義プロパティ、11+ では常に真の条件)。public プロパティの一覧で見る。
+        $properties = get_object_vars($e);
+
+        if (array_key_exists('queue', $properties)) {
+            // Laravel 11+: イベントが宛先を持つ。job 側の $queue より優先する (Queue::pushOn('high', $job)
+            // のように呼び出し側の指定が job 自身の宛先を上書きするケースでも、実際の宛先はこちら)。
+            $queue = $properties['queue'];
+
+            return is_string($queue) && $queue !== '' ? $queue : $this->defaultQueue($e->connectionName);
+        }
+
+        // Laravel 10: イベントに宛先が無いので job 自身が onQueue 等で持つ宛先を読む。
         $job = $e->job;
         if (is_object($job) && isset($job->queue) && is_string($job->queue)) {
             return $job->queue;
         }
 
-        return 'default';
+        // 宛先が指定されていない push は connection 既定のキューに入る。'default' 固定にすると、
+        // 既定キュー名が 'default' でない connection (queue.connections.*.queue) で consumer 側と
+        // 食い違い、実在しないキューの系列だけが伸びる。
+        return $this->defaultQueue($e->connectionName);
+    }
+
+    private function defaultQueue(mixed $connection): string
+    {
+        $queue = Config::get('queue.connections.'.((string) $connection).'.queue', 'default');
+
+        return is_string($queue) && $queue !== '' ? $queue : 'default';
     }
 
     private function producerJobName(JobQueued $e): string

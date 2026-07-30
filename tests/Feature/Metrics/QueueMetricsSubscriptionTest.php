@@ -3,6 +3,9 @@
 namespace Sensyn\LaravelOTelSupport\Tests\Feature\Metrics;
 
 use Illuminate\Contracts\Events\Dispatcher;
+use Illuminate\Contracts\Queue\Job;
+use Illuminate\Queue\Events\JobProcessed;
+use Illuminate\Queue\Events\JobProcessing;
 use Mockery;
 use OpenTelemetry\API\Metrics\MeterInterface;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
@@ -37,6 +40,50 @@ class QueueMetricsSubscriptionTest extends TestCase
         // 解決は発火ごとに走るので、JobProcessing で記録した開始時刻を JobProcessed 側で使うには
         // 同一インスタンスが返る必要がある。
         $this->assertSame(app(QueueMetrics::class), app(QueueMetrics::class));
+    }
+
+    public function test_every_handled_event_is_subscribed_on_the_application_dispatcher(): void
+    {
+        // 本番の購読は subscribeLazily 経路だけ。ここで全イベントを見ないと、HANDLERS の一部しか
+        // 登録しない退行 (= JobProcessing/JobProcessed/JobFailed 系が黙って記録されなくなる) を
+        // 検知できない (behaviour のテストは subscribe() 経路を通っているため素通りする)。
+        $events = app(Dispatcher::class);
+
+        foreach (array_keys(QueueMetrics::HANDLERS) as $event) {
+            $this->assertTrue(
+                $events->hasListeners($event),
+                "{$event} の listener がアプリの Dispatcher に登録されている必要がある。",
+            );
+        }
+    }
+
+    public function test_terminal_outcome_is_recorded_through_the_lazily_resolved_subscriber(): void
+    {
+        // JobProcessing -> JobProcessed の相関 (開始時刻の引き継ぎ) は、遅延解決のたびに同一インスタンスが
+        // 返る = singleton であることに依存する唯一の挙動。本番経路で通しておく。
+        $this->bootMeter();
+        config(['queue.connections.otel-test.driver' => 'redis']);
+        app()->when(QueueMetrics::class)
+            ->needs(MeterProviderInterface::class)
+            ->give(fn (): MeterProviderInterface => $this->meterProvider);
+
+        $job = Mockery::mock(Job::class);
+        $job->shouldReceive('uuid')->andReturn('uuid-1');
+        $job->shouldReceive('payload')->andReturn([]);
+        $job->shouldReceive('getQueue')->andReturn('example-queue');
+        $job->shouldReceive('attempts')->andReturn(1);
+        $job->shouldReceive('resolveName')->andReturn(FakeQueuedJob::class);
+        $job->shouldReceive('isReleased')->andReturn(false);
+        $job->shouldReceive('hasFailed')->andReturn(false);
+
+        $events = app(Dispatcher::class);
+        $events->dispatch(new JobProcessing('otel-test', $job));
+        $events->dispatch(new JobProcessed('otel-test', $job));
+
+        $metrics = $this->collectMetrics();
+        $this->assertSame(1, $this->counterValue($metrics['laravel.queue.job.finished']));
+        // duration は JobProcessing で記録した開始時刻が引き継がれた時だけ出る。
+        $this->assertSame(1, $this->histogramCount($metrics['laravel.queue.job.duration']));
     }
 
     public function test_queue_event_is_recorded_through_the_lazily_resolved_subscriber(): void
