@@ -5,7 +5,6 @@ namespace Sensyn\LaravelOTelSupport;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Support\ServiceProvider;
-use OpenTelemetry\API\Globals;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
 use OpenTelemetry\API\Trace\TracerProviderInterface;
 use Sensyn\LaravelOTelSupport\Metrics\MetricsServiceProvider;
@@ -16,6 +15,8 @@ use Sensyn\LaravelOTelSupport\Metrics\MetricsServiceProvider;
  * - config は本 provider が 1 回だけ merge / publish し、子 (Metrics) は otel-support.* を読むだけにする。
  * - 計装本体はサブモジュール配下に閉じ、OTel api のみに依存する (SDK / exporter の配線は消費側アプリの env autoload に任せる)。
  * - サブモジュール横断の worker flush は WorkerFlusher が担い、本 provider が配線する (理由は WorkerFlusher を参照)。
+ *
+ * @api Composer の package auto-discovery (extra.laravel.providers) が登録する公開 provider。
  */
 class OTelSupportServiceProvider extends ServiceProvider
 {
@@ -29,12 +30,18 @@ class OTelSupportServiceProvider extends ServiceProvider
 
         // WorkerFlusher は provider interface (api) のみに依存し、Globals (SDK autoload) への依存は
         // この contextual binding に閉じる。アプリ全体には bind せず、解決時にだけ注入する。
+        // Globals が投げたら Noop provider に倒す (理由は SafeGlobals): 解決は listener の発火時に走るので、
+        // 素で呼ぶと telemetry の初期化失敗が worker / dispatch 元のコードパスに着弾する。
         $this->app->when(WorkerFlusher::class)
             ->needs(TracerProviderInterface::class)
-            ->give(static fn (): TracerProviderInterface => Globals::tracerProvider());
+            ->give(static fn (): TracerProviderInterface => SafeGlobals::tracerProvider());
         $this->app->when(WorkerFlusher::class)
             ->needs(MeterProviderInterface::class)
-            ->give(static fn (): MeterProviderInterface => Globals::meterProvider());
+            ->give(static fn (): MeterProviderInterface => SafeGlobals::meterProvider());
+
+        // listener は発火時に container から解決される (WorkerFlusher::subscribeLazily) ので、dirty
+        // フラグ ($pending) をイベント間で共有するには毎回の解決で同一インスタンスが返る必要がある。
+        $this->app->singleton(WorkerFlusher::class);
     }
 
     public function boot(): void
@@ -57,13 +64,8 @@ class OTelSupportServiceProvider extends ServiceProvider
 
     private function registerWorkerFlusher(): void
     {
-        // 配線は console (artisan) 実行時のみ。web (FPM) では web 終了時の SDK shutdown flush で足りる。
-        // Looping / WorkerStopping は queue:work daemon でしか発火しないので、他の artisan コマンドでは
-        // listener は no-op (Globals::*Provider() も autoload 初期化済み provider の参照取得のみ)。
-        if (! $this->app->runningInConsole()) {
-            return;
-        }
-
-        $this->app->make(WorkerFlusher::class)->subscribe($this->app->make(Dispatcher::class));
+        // listener 登録だけを行い、WorkerFlusher 本体の生成 (= Globals 経由の provider 解決) は購読した
+        // イベントの初回発火まで遅らせる。SAPI で分岐しない理由と遅延解決の効果は subscribeLazily 参照。
+        WorkerFlusher::subscribeLazily($this->app->make(Dispatcher::class));
     }
 }

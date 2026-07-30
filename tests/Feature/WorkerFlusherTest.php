@@ -10,6 +10,8 @@ use Illuminate\Queue\Events\Looping;
 use Illuminate\Queue\Events\WorkerStopping;
 use Mockery;
 use OpenTelemetry\API\Common\Time\Clock;
+use OpenTelemetry\API\Metrics\Noop\NoopMeterProvider;
+use OpenTelemetry\API\Trace\NoopTracerProvider;
 use OpenTelemetry\SDK\Metrics\MeterProviderBuilder;
 use OpenTelemetry\SDK\Metrics\MeterProviderInterface;
 use OpenTelemetry\SDK\Metrics\MetricExporter\InMemoryExporter as MetricInMemoryExporter;
@@ -18,6 +20,7 @@ use OpenTelemetry\SDK\Trace\SpanExporter\InMemoryExporter;
 use OpenTelemetry\SDK\Trace\SpanProcessor\BatchSpanProcessor;
 use OpenTelemetry\SDK\Trace\TracerProvider;
 use OpenTelemetry\SDK\Trace\TracerProviderInterface as SdkTracerProvider;
+use ReflectionProperty;
 use RuntimeException;
 use Sensyn\LaravelOTelSupport\Tests\TestCase;
 use Sensyn\LaravelOTelSupport\WorkerFlusher;
@@ -127,6 +130,85 @@ class WorkerFlusherTest extends TestCase
         $dispatcher->dispatch(new WorkerStopping);
 
         $this->assertCount(1, $this->spanExporter->getSpans());
+    }
+
+    public function test_octane_request_terminated_flushes_without_a_job(): void
+    {
+        // Octane の HTTP worker は 1 プロセスで数百〜数千リクエストを処理するので、リクエスト境界で
+        // flush しないと HTTP metrics が worker の recycle まで出ない。ジョブ境界と違って
+        // JobProcessing (dirty フラグの起点) は飛ばないため、この経路は無条件に flush する必要がある。
+        $dispatcher = $this->subscribedDispatcher();
+        $this->endOneSpan();
+        $this->meterProvider->getMeter('test')->createCounter('requests')->add(1);
+
+        $dispatcher->dispatch(WorkerFlusher::OCTANE_REQUEST_TERMINATED);
+
+        $this->assertCount(1, $this->spanExporter->getSpans());
+        $this->assertNotEmpty($this->metricExporter->collect(true));
+    }
+
+    public function test_meter_is_flushed_even_when_the_tracer_flush_fails(): void
+    {
+        // provider ごとに独立して flush する必要がある。1 つの try で直列に呼ぶと、tracer が投げた時点で
+        // meter に到達せず pending も落ちないので、次の周回も同じ順で同じ所で落ちる = meter が worker の
+        // 生存中一度も flush されない状態が固定される (TracerProvider::forceFlush は実在の throw 経路を
+        // 持つ: BatchSpanProcessor::flush は直接 forceFlush されると捕まえた例外を再 throw する)。
+        $attempts = 0;
+        $flusher = new WorkerFlusher($this->tracerProviderThatFailsToFlush($attempts), $this->meterProvider);
+        $dispatcher = new Dispatcher;
+        $flusher->subscribe($dispatcher);
+        $this->meterProvider->getMeter('test')->createCounter('jobs')->add(1);
+
+        $dispatcher->dispatch(new JobProcessing('redis', Mockery::mock(Job::class)));
+        $dispatcher->until(new Looping('redis', 'default'));
+
+        $this->assertSame(1, $attempts, 'tracer の forceFlush まで到達している必要がある。');
+        $this->assertNotEmpty(
+            $this->metricExporter->collect(true),
+            'tracer の flush 失敗で meter の flush が飛んではいけない。',
+        );
+    }
+
+    public function test_api_noop_providers_are_skipped_by_the_force_flush_guard(): void
+    {
+        // 消費側が SDK autoload を切っている / 一部の signal だけ有効にしている構成では Globals が
+        // api の Noop provider を返す。forceFlush は SDK 実装にしか無いので method_exists のガードが
+        // 要る。ここが前提: Noop に forceFlush が生えていたらこのテストは何も再現しない。
+        $tracerProvider = new NoopTracerProvider;
+        $meterProvider = new NoopMeterProvider;
+        $this->assertHasNoForceFlush($tracerProvider);
+        $this->assertHasNoForceFlush($meterProvider);
+
+        $flusher = new WorkerFlusher($tracerProvider, $meterProvider);
+        $dispatcher = new Dispatcher;
+        $flusher->subscribe($dispatcher);
+
+        $dispatcher->dispatch(new JobProcessing('redis', Mockery::mock(Job::class)));
+        $this->assertNotFalse($dispatcher->until(new Looping('redis', 'default')));
+
+        // ガードを外すと "Call to undefined method" が forceFlush() の catch に飲まれ、失敗扱いになって
+        // pending が落ちない (= 毎周回同じ Error を踏み続け、flush が永久に成立しない)。
+        $this->assertFalse(
+            $this->pendingOf($flusher),
+            'Noop provider に対する flush は成功として扱う必要がある (毎周回の再試行にしてはいけない)。',
+        );
+    }
+
+    /**
+     * 引数を object で受けるのは静的解析のため: 具象の Noop クラスを直接渡すと PHPStan が
+     * 「常に false」と判定して落ちる (= 前提が静的にも成り立っていることの裏返し)。
+     */
+    private function assertHasNoForceFlush(object $provider): void
+    {
+        $this->assertFalse(
+            method_exists($provider, 'forceFlush'),
+            'api の Noop provider に forceFlush が無いことが前提 (生えているならガードのテストは無意味)。',
+        );
+    }
+
+    private function pendingOf(WorkerFlusher $flusher): bool
+    {
+        return (bool) (new ReflectionProperty(WorkerFlusher::class, 'pending'))->getValue($flusher);
     }
 
     /**

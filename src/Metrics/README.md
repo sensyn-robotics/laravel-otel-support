@@ -34,17 +34,6 @@ takes care of merging and publishing the config in one place (`metrics.*` in
 - The meter (instrumentation scope) names are `laravel-otel-support.metrics.http` and
   `laravel-otel-support.metrics.queue`.
 - Per metric:
-  - `http.server.request.duration`
-    - carries `http.route` (the route template) only when routing matched; the raw path is never used.
-    - `http.request.method` only ever holds a semconv known method or `_OTHER`, so the number of series
-      stays bounded no matter what a client sends. Requests whose method cannot be determined at all (a
-      malformed override such as `_method=FOO-BAR` makes Symfony's `getMethod()` throw) are recorded as
-      `_OTHER` too. `http.request.method_original` is deliberately omitted: it would bring the unbounded
-      cardinality straight back.
-    - A request goes uncounted in the rare case where collecting the rest of its attributes fails - for
-      instance `getScheme()` raising `ConflictingHeadersException` when a trusted `Forwarded` header
-      contradicts `X-Forwarded-Proto`. The instrumentation never lets its own failure escape into the
-      application's `terminate` chain, and it does not invent an attribute value either.
   - Every queue metric carries the job class as `laravel.queue.job.name`.
   - `laravel.queue.job.finished`
     - carries `laravel.queue.job.retried` (bool, `attempts > 1`).
@@ -89,8 +78,17 @@ it does not touch export wiring.
 
 ## About flushing
 
-- **HTTP (FPM)**: no explicit flush. The shutdown hook installed by the SDK autoloader exports at the end
-  of the request (the same path traces take).
-- **Queue worker (the `queue:work` CLI daemon)**: the shutdown hook only runs when the process exits, so
-  the umbrella's `WorkerFlusher` calls `forceFlush` on the meter provider at job boundaries (`Looping` /
-  `WorkerStopping`); `QueueMetrics` sticks to recording.
+Neither instrumentation flushes; both only record. Flushing belongs to the umbrella's `WorkerFlusher`,
+because the shutdown hook installed by the SDK autoloader runs when the **PHP process** exits — which is
+the end of the request under FPM, but only the end of the worker's life in a long-lived process.
+
+- **HTTP under FPM**: no explicit flush needed. The shutdown hook exports at the end of the request (the
+  same path traces take).
+- **HTTP under Octane** (FrankenPHP / Swoole / RoadRunner): one process serves hundreds or thousands of
+  requests, so `WorkerFlusher` flushes at Octane's `RequestTerminated` to keep the FPM behaviour
+  ("export at the end of the request"). Without it `http.server.request.duration` would sit in the
+  meter provider until the worker recycles, and be lost entirely if the worker is SIGKILLed.
+- **Queue worker (the `queue:work` daemon)**: `WorkerFlusher` flushes at job boundaries (`Looping` /
+  `WorkerStopping`).
+
+All of it is behind `worker_flusher.enabled`.

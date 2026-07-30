@@ -12,8 +12,9 @@ SDK autoloader.
 
 This is an umbrella package for the instrumentation that the official `opentelemetry-auto-laravel` plus
 the SDK autoloader do *not* cover. Traces keep coming from auto-laravel; this package adds the other
-signals (metrics today) and provides a `WorkerFlusher` that flushes buffered signals at job boundaries
-inside long-lived queue workers.
+signals (metrics today) and provides a `WorkerFlusher` that flushes buffered signals at the work
+boundaries of long-lived processes — `queue:work` jobs and Octane HTTP requests — where the SDK's
+process-exit flush comes far too late.
 
 Runtime code depends on the OTel **api and context packages only**. SDK, exporter and autoload wiring
 are left to the consuming application's env, which is why `open-telemetry/sdk` is not in `require`
@@ -105,7 +106,7 @@ php artisan vendor:publish --tag=otel-support-config
 | `metrics.http.buckets` | `OTEL_METRICS_HTTP_BUCKETS` | semconv recommendation | Bucket boundaries of the HTTP duration histogram (seconds, comma-separated) |
 | `metrics.queue.enabled` | – | `true` | Queue metrics instrumentation on/off |
 | `metrics.queue.duration_buckets` | `OTEL_METRICS_QUEUE_DURATION_BUCKETS` | semconv recommendation | Bucket boundaries of the job duration histogram (seconds, comma-separated) |
-| `worker_flusher.enabled` | `OTEL_WORKER_FLUSH_ENABLED` | `true` | `forceFlush` at queue-worker job boundaries on/off |
+| `worker_flusher.enabled` | `OTEL_WORKER_FLUSH_ENABLED` | `true` | `forceFlush` at the work boundaries of long-lived processes (queue-worker jobs, Octane requests) on/off |
 
 Bucket lists may be unordered and contain duplicates (they are sorted and de-duplicated), and invalid
 values (empty, non-numeric) fall back to the default.
@@ -145,29 +146,28 @@ per job, so a log line would amplify the problem instead of reporting it. **A fa
 as missing telemetry, never as changed application behaviour**; when data goes missing, look for the
 cause in the OTel SDK's own diagnostics rather than the application log.
 
-One thing is deliberately *not* fail-open: wiring `WorkerFlusher`, which happens once during the
-provider's `boot()` on console processes only. There is no job in flight and nothing half-done to
-corrupt at that point, so a failure there should stop the artisan command visibly rather than leave a
-worker running with silently broken telemetry.
+Wiring is fail-open too. The provider only *registers listeners* during `boot()`; `WorkerFlusher` itself
+is built the first time one of those events fires, and the global tracer and meter providers are
+resolved through the same guarded factory as the instrumentation. A broken `Globals` therefore cannot
+turn a telemetry misconfiguration into a failing `artisan migrate` or a dead `queue:work`.
 
 ### Flags a consumer should consider turning off
 
 The cases below are the ones where leaving a flag on is wasteful or misleading, rather than merely
 inert.
 
-- **`worker_flusher.enabled=false` — services that never run a `queue:work` daemon** (HTTP-only
-  services, or services whose jobs run in another runtime / an external worker). There is nothing to
-  flush there: `Looping` / `WorkerStopping` only fire under `queue:work`, so the listeners can never
-  run, yet every artisan invocation still pays for wiring them — including resolving the global tracer
-  and meter providers, which initialises the SDK on a console process that will never emit worker
-  telemetry.
+- **`worker_flusher.enabled=false` — services that run neither a `queue:work` daemon nor Octane.**
+  Under plain FPM there is nothing to flush: the SDK's shutdown hook already exports at the end of every
+  request, and the subscribed events (`Looping`, `WorkerStopping`, Octane's `RequestTerminated`) can
+  never fire, so the listeners cost a few array entries at boot and nothing else.
 
-  Also consider it when **per-job synchronous export becomes a measurable cost on a high-throughput
-  queue** (today the flush runs on every job; deltas mean it does not double-count).
+  Also consider it when **synchronous export per unit of work becomes a measurable cost** — a
+  high-throughput queue, or a high-RPS Octane service (today the flush runs on every job and every
+  Octane request; deltas mean it does not double-count).
 
-  Be aware of the trade-off: disabling it stops the per-job flush of *both* traces and metrics and
-  leaves everything to the SDK's shutdown flush at process exit, which in a long-lived daemon means
-  exports are heavily delayed or lost.
+  Be aware of the trade-off: disabling it stops the flush of *both* traces and metrics and leaves
+  everything to the SDK's shutdown flush at process exit. In a long-lived daemon or an Octane worker
+  that means exports are heavily delayed, and lost outright if the process is SIGKILLed.
 - **`metrics.queue.enabled=false` — services that do not use queues, or only the `sync` driver.**
   `sync` jobs run inline in the dispatching process (an HTTP request, typically) and are deliberately
   not counted, so the queue metrics would stay empty forever.
@@ -191,9 +191,14 @@ exporter and the auto-instrumentation (`open-telemetry/sdk`, `open-telemetry/exp
 - `src/Metrics/`: HTTP and queue metrics instrumentation. See
   [src/Metrics/README.md](src/Metrics/README.md) for the recorded metrics, their attributes and the
   naming rationale.
-- `src/WorkerFlusher.php`: `forceFlush`es the signal providers at queue-worker job boundaries
-  (`Looping` / `WorkerStopping`). The class docblock explains why those flush points were chosen and
-  why the class sits directly under the umbrella rather than in a submodule.
+- `src/WorkerFlusher.php`: `forceFlush`es the signal providers at the work boundaries of long-lived
+  processes — queue-worker jobs (`Looping` / `WorkerStopping`) and Octane requests
+  (`RequestTerminated`, subscribed by class name so that `laravel/octane` stays out of the dependency
+  list). The class docblock explains why those flush points were chosen and why the class sits directly
+  under the umbrella rather than in a submodule.
+- `src/SafeGlobals.php`: resolves the global tracer / meter provider and falls back to the API's Noop
+  providers if `Globals` throws. Both providers inject through it, which is what keeps a telemetry
+  misconfiguration out of the application's own code paths.
 
 ## Development
 

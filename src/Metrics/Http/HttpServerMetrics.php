@@ -16,8 +16,13 @@ use Throwable;
 
 /**
  * HTTP server リクエストの所要時間を OTel histogram (http.server.request.duration) に記録する
- * terminable な global middleware。flush は明示的に行わず、FPM の request 終了時に SDK autoload の
- * shutdown hook が export する (queue worker と違い HTTP は明示 flush 不要)。
+ * terminable な global middleware。
+ *
+ * flush は行わない (本クラスは record 専念)。FPM は 1 リクエスト 1 プロセスなので request 終了時に
+ * SDK autoload の shutdown hook が export するが、Octane の worker ではプロセスが数百〜数千リクエストを
+ * 生きるため、そこは umbrella の WorkerFlusher が Octane の RequestTerminated で flush する。
+ *
+ * @internal MetricsServiceProvider が global middleware として登録する。消費側アプリ向けの API ではない。
  */
 class HttpServerMetrics
 {
