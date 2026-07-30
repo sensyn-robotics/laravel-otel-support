@@ -15,11 +15,33 @@ Consequently:
 - Pull requests from outside Sensyn Robotics will be closed without review.
 - Feature requests and support questions are out of scope, and such issues may be closed without a
   response.
-- Backward compatibility is maintained only as far as our own services require it. Breaking changes
-  may ship in any release, so pin the version you depend on.
+- The scope of what stays backward compatible is decided by what our own services need. What *is*
+  covered follows the versioning rules below, so a caret constraint is safe to leave in place.
 
 You are of course free to fork and modify the code under the terms of the
 [Apache License 2.0](LICENSE).
+
+## Versioning and compatibility
+
+Releases follow semantic versioning with the usual Composer reading of the pre-1.0 range: **below 1.0
+the minor position acts as the major.**
+
+- Breaking changes ship in a minor bump (`0.1.x` → `0.2.0`), and in a major bump once 1.0 is out.
+- Patch releases (`0.1.0` → `0.1.1`) are backward compatible. `^0.1` in a consumer therefore never
+  picks up a breaking change through an unrelated `composer update`.
+
+Two surfaces count as breaking beyond the obvious PHP signatures, because both break a consumer without
+breaking any call site:
+
+- **The published config's dependency on `Buckets`.** `config/otel-support.php` calls
+  `Buckets::parse()` with `Buckets::DEFAULT_HTTP` / `DEFAULT_QUEUE`, and a consumer that published the
+  file keeps that call in its own repository. Changing those three members breaks config loading — which
+  happens before the framework boots, so every request 500s and the package's fail-open guarantees do not
+  apply. They are marked `@api`; the rest of `src/` is marked `@internal` and may change freely.
+- **Metric names, attribute keys and attribute values.** They are the contract that the consumers'
+  dashboards, recording rules and alerts are written against. This includes adopting an upstream rename
+  in the OpenTelemetry semantic conventions: the version this package targets is declared in
+  [src/Metrics/README.md](src/Metrics/README.md), and following a rename is a minor bump, never a patch.
 
 ## Reporting a security issue
 
@@ -84,18 +106,32 @@ its floor stays in `composer.json`, which is why CI never pins `orchestra/testbe
 - **Runtime code may only depend on `open-telemetry/api` and `open-telemetry/context`.**
   `open-telemetry/sdk` stays in `require-dev` (the tests need in-memory exporters); SDK, exporter and
   autoload wiring is the consuming application's responsibility. Adding an SDK import to `src/` breaks
-  that contract.
+  that contract — a consumer without the SDK installed then gets a fatal error while the provider
+  registers. Nothing else catches this (PHPStan and the tests both run with the SDK in `vendor/`), so CI
+  has a dedicated `runtime-dependencies` job that greps `src/` and `config/` for the `OpenTelemetry\SDK`
+  and `OpenTelemetry\Contrib` namespaces. `open-telemetry/sem-conv` is off limits for the same reason:
+  it is a dependency of the SDK, which is why the semconv names and values are string literals.
 - **The package supports Laravel 10, 11, 12 and 13 from a single branch.** Do not use an API that does
   not exist in every supported version without guarding it — the queue event payloads in particular
   differ between Laravel 10 and 11+.
 - **No `ext-*` requirements and no `config.platform` entries in `composer.json`.** The instrumentation
   needs neither, and platform overrides would break the PHP matrix.
 - **Do not add a PHPStan baseline.** The package is small; fix the code instead.
-- **Keep the config file merge-safe.** `mergeConfigFrom()` only shallow-merges top-level keys, so keep
-  new options nested under the existing top-level keys (`metrics`, `worker_flusher`) and document them
-  in the config table in [README.md](README.md).
+- **Every config read needs an inline default, and that default must equal the shipped value.**
+  `mergeConfigFrom()` is a shallow merge of top-level keys
+  (`$config->set($key, array_merge(require $path, $config->get($key, [])))`), so an application file that
+  defines `metrics` replaces our whole `metrics` subtree. A new key nested under an existing top-level key
+  is therefore **absent** for every consumer that published the config before it was added, and the
+  package's own tests cannot see it because they use the shipped file. Passing the default at the call
+  site (`$config->get('otel-support.metrics.…', true)`, `Buckets::fromConfig($key, $default)`) is what
+  makes new options work without a re-publish; a new **top-level** key is safe on its own, since the
+  application file has no entry to override it with. Document new options in the config table in
+  [README.md](README.md).
+- **Mark the public surface.** Anything a consumer's own files can reach — today `OTelSupportServiceProvider`
+  and the `Buckets` members used by the published config — is `@api` and covered by the versioning rules
+  above. Everything else is `@internal`, even though the framework requires it to be `public`.
 - Every change to `src/` needs a matching test. New metrics or attributes must also be reflected in
-  `src/Metrics/README.md`.
+  `src/Metrics/README.md`, including the semconv version that section declares.
 - **Documentation is written in English.** The repository is public, so `README.md`, this file and
   `src/Metrics/README.md` are English; inline comments and docblocks in `src/` stay Japanese. Do not add
   a translated copy of a document — a duplicate that drifts out of sync is worse than a single language.

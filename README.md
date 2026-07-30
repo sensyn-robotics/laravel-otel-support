@@ -66,6 +66,11 @@ How the constraint is resolved:
   `0.2.0` release needs a constraint bump in every consumer (pre-1.0 caret constraints do not cross the
   minor boundary). If a constraint does not resolve, check that a matching tag exists — there is no
   registry to fall back on.
+- **`^0.1` never picks up a breaking change.** Below 1.0 the minor position is treated as the major, so
+  breaking changes — including changes to metric names, attribute keys or attribute values, which break
+  dashboards without breaking any PHP call — only ship in `0.2.0`, `0.3.0`, … A patch release
+  (`0.1.1`, …) is always backward compatible and safe to pick up in an unrelated `composer update`.
+  The full rules are in [CONTRIBUTING.md](CONTRIBUTING.md#versioning-and-compatibility).
 - An untagged commit can be required as `dev-main`, but keep that to local experiments: the constraint
   follows a moving branch, so any `composer update` silently advances it.
 - The repository is public, so no Composer credentials are needed in CI or in Docker builds. Composer

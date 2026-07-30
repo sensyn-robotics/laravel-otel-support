@@ -5,6 +5,14 @@ namespace Sensyn\LaravelOTelSupport\Metrics;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Log;
 
+/**
+ * histogram のバケット境界のパース / 正規化。
+ *
+ * 同梱 config が参照するため、publish 済み config を持つ消費側アプリのファイルから直接呼ばれる:
+ * config/otel-support.php は `Buckets::parse(env(...), Buckets::DEFAULT_HTTP)` の形でこのクラスに
+ * 依存し、publish するとその式が消費側リポジトリにコピーとして残る。@api を付けたメンバは
+ * その BC 面 (壊すと config ロード時 = framework boot 前に fatal になる)。
+ */
 class Buckets
 {
     /**
@@ -13,13 +21,23 @@ class Buckets
      * https://opentelemetry.io/docs/specs/semconv/messaging/messaging-metrics/
      *
      * @var list<int|float>
+     *
+     * @internal DEFAULT_HTTP / DEFAULT_QUEUE の実体。消費側は用途別の定数を使うこと。
      */
     public const SEMCONV_DURATION = [0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10];
 
-    /** @var list<int|float> */
+    /**
+     * @var list<int|float>
+     *
+     * @api publish 済み config が参照する。
+     */
     public const DEFAULT_HTTP = self::SEMCONV_DURATION;
 
-    /** @var list<int|float> */
+    /**
+     * @var list<int|float>
+     *
+     * @api publish 済み config が参照する。
+     */
     public const DEFAULT_QUEUE = self::SEMCONV_DURATION;
 
     /**
@@ -28,6 +46,8 @@ class Buckets
      *
      * @param  list<int|float>  $default
      * @return list<int|float>
+     *
+     * @api publish 済み config が参照する。
      */
     public static function parse(mixed $csv, array $default): array
     {
@@ -57,6 +77,8 @@ class Buckets
      *
      * @param  list<int|float>  $default
      * @return list<int|float>
+     *
+     * @internal 計装が config を読むための入口。publish 済み config は parse() を使う。
      */
     public static function fromConfig(string $configKey, array $default): array
     {
@@ -81,6 +103,8 @@ class Buckets
      *
      * @param  array<array-key, mixed>  $boundaries
      * @return list<int|float>|null
+     *
+     * @internal parse() / fromConfig() の共通処理。
      */
     public static function normalize(array $boundaries): ?array
     {
