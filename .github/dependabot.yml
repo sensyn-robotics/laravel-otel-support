@@ -1,9 +1,9 @@
 version: 2
 
-# Grouping policy follows fc-datastore: dependencies that are released together, or that have
-# to move as one generation, are bundled into a single pull request to cut CI runner time,
-# review load and dependency drift. A dependency that matches several groups is assigned to
-# the group declared *first*, so narrow groups come before broad ones.
+# Grouping policy: dependencies that are released together, or that have to move as one
+# generation, are bundled into a single pull request to cut CI runner time, review load and
+# dependency drift. A dependency that matches several groups is assigned to the group declared
+# *first*, so narrow groups come before broad ones.
 updates:
   # The package's own requirements. There is no committed composer.lock (a library has to let
   # consumers resolve their own graph), so Dependabot maintains the constraints in
@@ -35,7 +35,7 @@ updates:
           - "orchestra/testbench"
       # OTel PHP splits into stable packages (api, context, sdk) and experimental ones on a
       # different version line, and a mixed generation breaks - so they are updated as a unit,
-      # majors included. Same reasoning as the opentelemetry group in fc-datastore.
+      # majors included.
       opentelemetry:
         patterns:
           - "open-telemetry/*"
