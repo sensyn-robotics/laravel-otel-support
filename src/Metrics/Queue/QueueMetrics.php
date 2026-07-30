@@ -11,6 +11,7 @@ use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
 use Illuminate\Queue\Events\JobQueued;
 use Illuminate\Support\Facades\Config;
+use Illuminate\Support\Str;
 use OpenTelemetry\API\Metrics\CounterInterface;
 use OpenTelemetry\API\Metrics\HistogramInterface;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
@@ -233,9 +234,11 @@ class QueueMetrics
      */
     private function doRecordEnqueued(JobQueued $e): void
     {
+        $driver = $this->driver($e->connectionName);
+
         $this->sent->add(1, [
-            'messaging.system' => $this->system($e->connectionName),
-            'messaging.destination.name' => $this->producerQueue($e),
+            'messaging.system' => $this->toSemconvSystem($driver),
+            'messaging.destination.name' => $this->producerDestination($e, $driver),
             'messaging.operation.name' => 'send',
             'laravel.queue.job.name' => $this->producerJobName($e),
         ]);
@@ -300,7 +303,7 @@ class QueueMetrics
         // job 名はクラス数ぶんの有界カーディナリティなので histogram にも付けてよい。
         $attrs = [
             'messaging.system' => $this->toSemconvSystem($driver),
-            'messaging.destination.name' => (string) $job->getQueue(),
+            'messaging.destination.name' => $this->destinationName((string) $job->getQueue()),
             'laravel.queue.job.name' => (string) $job->resolveName(),
         ];
         // error.type (例外クラス名) は counter と histogram (duration) の両方に付ける。例外クラスは
@@ -327,12 +330,6 @@ class QueueMetrics
         return (string) ($job->uuid() ?? $job->getJobId());
     }
 
-    /** messaging.system (= driver を semconv の well-known 値に写したもの)。 */
-    private function system(mixed $connection): string
-    {
-        return $this->toSemconvSystem($this->driver($connection));
-    }
-
     private function toSemconvSystem(string $driver): string
     {
         return self::SEMCONV_SYSTEM[$driver] ?? $driver;
@@ -345,8 +342,74 @@ class QueueMetrics
     }
 
     /**
-     * producer 側の messaging.destination.name。consumer 側 (recordTerminal の $job->getQueue()) と
+     * messaging.destination.name の値 = キュー名。producer / consumer 双方がこれを通す。
+     *
+     * sqs では consumer 側の Job::getQueue() がキュー名ではなく**フルのキュー URL** を返す
+     * (SqsQueue::pop が 'QueueUrl' => $queue = $this->getQueue($queue) と代入した URL をそのまま
+     * SqsJob に渡すため)。URL には prefix = エンドポイントと AWS アカウント ID が含まれるので、
+     * producer 側の値 (push の宛先引数 = キュー名) とは絶対に一致せず、結合が成立しない。
+     * URL なら最終セグメント (= キュー名) に落として揃える:
+     *   - semconv の messaging.destination.name は例示値も 'MyQueue' 等の名前で、OTel の他言語計装も
+     *     同じ (java の SqsAttributesGetter は queueUrl の最終セグメントを使う)。URL のままだと
+     *     同じブローカーに対して他言語計装と別系列になる。
+     *   - label に AWS アカウント ID を出さずに済む。
+     *
+     * URL 判定は SqsQueue::getQueue 自身と同じ filter_var で行う (URL でない値には触らないので、
+     * '/' を含むだけの redis / database のキュー名は壊れない)。
+     */
+    private function destinationName(string $queue): string
+    {
+        if (filter_var($queue, FILTER_VALIDATE_URL) === false) {
+            return $queue;
+        }
+
+        $name = Str::afterLast($queue, '/');
+
+        // '.../' で終わる (= 名前が空) 異常な URL では、空文字を出すより元の値を残す方が追える。
+        return $name !== '' ? $name : $queue;
+    }
+
+    /**
+     * producer 側の messaging.destination.name。consumer 側 (recordTerminal の Job::getQueue()) と
      * 同じキュー名になることが要件 = 両者を結合してキュー単位のバックログを見られること。
+     */
+    private function producerDestination(JobQueued $e, string $driver): string
+    {
+        $queue = $this->producerQueue($e);
+
+        // 呼び出し側が URL を渡した場合、SqsQueue::getQueue はそれを素通しして suffix を付けない。
+        // 同じ条件 (URL でない時だけ suffix) にしないと consumer 側とずれる。
+        if ($driver === 'sqs' && filter_var($queue, FILTER_VALIDATE_URL) === false) {
+            $queue = $this->withSqsSuffix($queue, $e->connectionName);
+        }
+
+        return $this->destinationName($queue);
+    }
+
+    /**
+     * sqs の実キュー名は connection の suffix 付き (queue.connections.*.suffix。AWS アカウントを環境間で
+     * 共有する時に使う)。consumer 側は実キュー URL からその名前を読むので、push の宛先引数しか知らない
+     * producer 側では SqsQueue::suffixQueue と同じ規則を適用して揃える (.fifo キューは FIFO の
+     * マーカーを保つため suffix を '.fifo' の前に入れる)。
+     *
+     * 付与は Str::finish なので、宛先に既に suffix が付いている場合は二重に付かない (framework も同じ)。
+     */
+    private function withSqsSuffix(string $queue, mixed $connection): string
+    {
+        $suffix = Config::get('queue.connections.'.((string) $connection).'.suffix', '');
+        if (! is_string($suffix) || $suffix === '') {
+            return $queue;
+        }
+
+        if (str_ends_with($queue, '.fifo')) {
+            return Str::finish(Str::beforeLast($queue, '.fifo'), $suffix).'.fifo';
+        }
+
+        return Str::finish($queue, $suffix);
+    }
+
+    /**
+     * push の宛先引数 (正規化前)。producerDestination() が suffix 付与と URL の正規化を担う。
      *
      * JobQueued の扱いは Laravel のバージョンで違う: 11.x 以降のイベントは push した宛先そのものを
      * $queue に持ち (Queue::enqueueUsing に渡された引数。呼び出し側がキューを指定しなければ null)、

@@ -44,9 +44,10 @@ takes care of merging and publishing the config in one place (`metrics.*` in
     - `messaging.system` is the Laravel queue driver mapped onto semconv's well-known values, which
       today means `sqs` → `aws_sqs`. Drivers with no well-known value (`redis`, `database`,
       `beanstalkd`, `sync`, …) are passed through as the custom value semconv permits.
-    - `messaging.destination.name` is the queue the message was really pushed to, so that it joins
-      with the consumer-side attribute on `laravel.queue.job.*` (queue backlog =
-      `sum(sent) - sum(finished)` per queue). It comes from `JobQueued::$queue` on Laravel 11+, and
+    - `messaging.destination.name` is the name of the queue the message was really pushed to, so
+      that it joins with the consumer-side attribute on `laravel.queue.job.*` (queue backlog =
+      `sum(sent) - sum(finished)` per queue; the `sqs` driver needs the normalisation described
+      below for that to hold). It comes from `JobQueued::$queue` on Laravel 11+, and
       falls back to the connection's default queue (`queue.connections.*.queue`) when the caller
       named no queue. On **Laravel 10 the event carries no queue name**, so the job's own
       destination (`onQueue()` / a `$queue` property) is used instead and a `Queue::pushOn()` that
@@ -63,6 +64,17 @@ takes care of merging and publishing the config in one place (`metrics.*` in
       contradicts `X-Forwarded-Proto`. The instrumentation never lets its own failure escape into the
       application's `terminate` chain, and it does not invent an attribute value either.
   - Every queue metric carries the job class as `laravel.queue.job.name`.
+  - Every queue metric carries the queue as `messaging.destination.name`, and on the `sqs` driver
+    both sides are normalised to the queue *name* so that they join:
+    - The consumer side would otherwise report the **full queue URL**, because that is what Laravel
+      puts on the job (`SqsQueue::pop()` hands `getQueue()`'s return value — the URL — to `SqsJob`).
+      A URL is therefore reduced to its last path segment. That is the queue name semconv's own
+      examples use and what other languages' SQS instrumentation emits, and it keeps the AWS
+      account id (part of the URL) out of the label.
+    - The producer side only knows the queue argument of the push, so it applies the connection's
+      `suffix` (`queue.connections.*.suffix`) exactly as `SqsQueue` does — before the `.fifo`
+      marker, and not at all when the caller passed a queue URL of its own, which SQS queues use
+      verbatim.
   - `laravel.queue.job.finished`
     - carries `laravel.queue.job.retried` (bool, `attempts > 1`).
       - Retry rate is `sum(...finished{retried="true"}) / sum(...finished)`.

@@ -110,6 +110,102 @@ class QueueMetricsTest extends TestCase
         $this->assertSame('aws_sqs', $this->attributesOf($metrics['laravel.queue.job.duration'])['messaging.system']);
     }
 
+    public function test_sqs_queue_url_is_reported_as_the_queue_name_on_both_sides(): void
+    {
+        // sqs の consumer 側は Job::getQueue() がフルのキュー URL を返す (SqsQueue::pop が SqsJob に渡す
+        // のは getQueue() の戻り = URL)。producer 側は push の宛先 = キュー名なので、URL のままだと
+        // 系列が分かれてキュー単位の結合 (sum(sent) - sum(finished)) が成立しない。
+        config(['queue.connections.otel-sqs.driver' => 'sqs']);
+        $dispatcher = $this->subscribedDispatcher();
+        $job = $this->consumerJob(
+            FakeQueuedJob::class,
+            'https://sqs.ap-northeast-1.amazonaws.com/123456789012/emails',
+        );
+
+        $dispatcher->dispatch($this->jobQueued('otel-sqs', 'id-1', new FakeQueuedJob, 'emails'));
+        $dispatcher->dispatch(new JobProcessing('otel-sqs', $job));
+        $dispatcher->dispatch(new JobProcessed('otel-sqs', $job));
+
+        $metrics = $this->collectMetrics();
+        $terminal = $this->attributesOf($metrics['laravel.queue.job.finished'])['messaging.destination.name'];
+
+        $this->assertSame('emails', $terminal, 'URL ではなくキュー名 (URL の最終セグメント) を出す。');
+        $this->assertSame('emails', $this->attributesOf($metrics['laravel.queue.job.duration'])['messaging.destination.name']);
+        $this->assertSame(
+            $this->attributesOf($metrics['messaging.client.sent.messages'])['messaging.destination.name'],
+            $terminal,
+            'producer と consumer で値が違うとキュー単位で結合できない。',
+        );
+    }
+
+    public function test_sqs_producer_applies_the_connection_suffix(): void
+    {
+        // suffix 付き connection (1 つの AWS アカウントを環境間で共有する構成) では、実キュー名が
+        // 'emails-staging' になる (SqsQueue::suffixQueue)。producer が suffix を落とすと、consumer 側
+        // (実キュー URL 由来) と結合できない。
+        config([
+            'queue.connections.otel-sqs.driver' => 'sqs',
+            'queue.connections.otel-sqs.suffix' => '-staging',
+        ]);
+        $dispatcher = $this->subscribedDispatcher();
+        $job = $this->consumerJob(
+            FakeQueuedJob::class,
+            'https://sqs.ap-northeast-1.amazonaws.com/123456789012/emails-staging',
+        );
+
+        $dispatcher->dispatch($this->jobQueued('otel-sqs', 'id-1', new FakeQueuedJob, 'emails'));
+        $dispatcher->dispatch(new JobProcessing('otel-sqs', $job));
+        $dispatcher->dispatch(new JobProcessed('otel-sqs', $job));
+
+        $metrics = $this->collectMetrics();
+        $this->assertSame(
+            'emails-staging',
+            $this->attributesOf($metrics['messaging.client.sent.messages'])['messaging.destination.name'],
+        );
+        $this->assertSame(
+            'emails-staging',
+            $this->attributesOf($metrics['laravel.queue.job.finished'])['messaging.destination.name'],
+        );
+    }
+
+    public function test_sqs_producer_puts_the_suffix_before_the_fifo_marker(): void
+    {
+        // FIFO キューは名前が '.fifo' で終わる必要があるので、suffix はその前に入る
+        // (SqsQueue::suffixQueue と同じ規則。'orders.fifo-staging' は実在しないキュー名になる)。
+        config([
+            'queue.connections.otel-sqs.driver' => 'sqs',
+            'queue.connections.otel-sqs.suffix' => '-staging',
+        ]);
+        $dispatcher = $this->subscribedDispatcher();
+
+        // Laravel 10 (イベントが宛先を持たない版) でも同じ宛先を読めるよう、job 側にも持たせる。
+        $job = new stdClass;
+        $job->queue = 'orders.fifo';
+        $dispatcher->dispatch($this->jobQueued('otel-sqs', 'id-1', $job, 'orders.fifo'));
+
+        $attrs = $this->attributesOf($this->collectMetrics()['messaging.client.sent.messages']);
+        $this->assertSame('orders-staging.fifo', $attrs['messaging.destination.name']);
+    }
+
+    public function test_sqs_producer_does_not_suffix_a_queue_url_given_by_the_caller(): void
+    {
+        // SqsQueue::getQueue は URL 形式の宛先をそのまま使う (prefix も suffix も付けない)。producer 側も
+        // 同じ条件にしないと consumer 側 (その URL 由来) とずれる。
+        config([
+            'queue.connections.otel-sqs.driver' => 'sqs',
+            'queue.connections.otel-sqs.suffix' => '-staging',
+        ]);
+        $dispatcher = $this->subscribedDispatcher();
+
+        $url = 'https://sqs.ap-northeast-1.amazonaws.com/123456789012/emails';
+        $job = new stdClass;
+        $job->queue = $url;
+        $dispatcher->dispatch($this->jobQueued('otel-sqs', 'id-1', $job, $url));
+
+        $attrs = $this->attributesOf($this->collectMetrics()['messaging.client.sent.messages']);
+        $this->assertSame('emails', $attrs['messaging.destination.name']);
+    }
+
     public function test_driver_without_a_semconv_value_is_passed_through(): void
     {
         // well-known 値が無い driver (redis / database / beanstalkd) はカスタム値として driver 名を出す。
