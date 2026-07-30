@@ -117,6 +117,13 @@ its floor stays in `composer.json`, which is why CI never pins `orchestra/testbe
   differ between Laravel 10 and 11+.
 - **No `ext-*` requirements and no `config.platform` entries in `composer.json`.** The instrumentation
   needs neither, and platform overrides would break the PHP matrix.
+- **A `require-dev` floor has to install *and* run on PHP 8.1.** `--prefer-lowest` resolves the dev
+  tools as well, so a floor whose lowest matching release needs a newer PHP makes the `lowest` leg
+  unresolvable, and a floor whose lowest matching release is broken makes `composer check`
+  unreproducible there. `laravel/pint` is the live example, wedged between the two: `1.18.0` cannot run
+  at all (`Call to undefined method PhpCsFixer\Config::setParallelConfig()`, fixed in `1.18.1`), while
+  from `1.21.0` on Pint itself requires PHP `^8.2` — hence the `^1.18.1` floor, which is what
+  `--prefer-lowest` picks up.
 - **Do not add a PHPStan baseline.** The package is small; fix the code instead.
 - **Every config read needs an inline default, and that default must equal the shipped value.**
   `mergeConfigFrom()` is a shallow merge of top-level keys
