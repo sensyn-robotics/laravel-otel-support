@@ -12,6 +12,7 @@ use OpenTelemetry\API\Trace\TracerProviderInterface;
 use OpenTelemetry\SDK\Trace\SpanExporter\InMemoryExporter;
 use OpenTelemetry\SDK\Trace\SpanProcessor\BatchSpanProcessor;
 use OpenTelemetry\SDK\Trace\TracerProvider;
+use Sensyn\LaravelOTelSupport\Tests\Support\FailsGlobalMeterProvider;
 use Sensyn\LaravelOTelSupport\Tests\Support\MakesJobDoubles;
 use Sensyn\LaravelOTelSupport\Tests\TestCase;
 use Sensyn\LaravelOTelSupport\WorkerFlusher;
@@ -27,6 +28,7 @@ use Sensyn\LaravelOTelSupport\WorkerFlusher;
  */
 class WorkerFlusherSubscriptionTest extends TestCase
 {
+    use FailsGlobalMeterProvider;
     use MakesJobDoubles;
 
     private InMemoryExporter $spanExporter;
@@ -114,6 +116,24 @@ class WorkerFlusherSubscriptionTest extends TestCase
         $events->dispatch(new WorkerStopping);
 
         $this->assertCount(1, $this->spanExporter->getSpans());
+    }
+
+    public function test_flush_survives_a_failing_globals_resolution(): void
+    {
+        // provider の解決は listener の発火時 = worker / リクエスト終了処理のコードパス上で走る。
+        // Globals を素で呼ぶと telemetry の初期化失敗が queue:work を exit 1 で落とす (以前は boot 時に
+        // 解決していたため、migrate / config:cache を含む全 artisan コマンドが boot 段階で死んでいた)。
+        // in-memory provider に差し替えず、本物の Globals 経路で通す。
+        $this->withFailingGlobalMeterProvider(function (): void {
+            $events = app(Dispatcher::class);
+
+            $events->dispatch(new JobProcessing('redis', $this->queuedJob()));
+            $this->assertNotFalse($events->until(new Looping('redis', 'default')));
+            $events->dispatch(WorkerFlusher::OCTANE_REQUEST_TERMINATED);
+        });
+
+        // 解決自体は起きていること。listener が未登録で素通りしただけなら上の検証は無意味になる。
+        $this->assertTrue(app()->resolved(WorkerFlusher::class));
     }
 
     public function test_octane_request_boundary_flush_runs_through_the_application_dispatcher(): void
