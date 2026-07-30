@@ -162,9 +162,11 @@ The cases below are the ones where leaving a flag on is wasteful or misleading, 
 inert.
 
 - **`worker_flusher.enabled=false` — services that run neither a `queue:work` daemon nor Octane.**
-  Under plain FPM there is nothing to flush: the SDK's shutdown hook already exports at the end of every
-  request, and the subscribed events (`Looping`, `WorkerStopping`, Octane's `RequestTerminated`) can
-  never fire, so the listeners cost a few array entries at boot and nothing else.
+  Under plain FPM there is nothing to flush, because the SDK's shutdown hook already exports at the end
+  of every request. The flush boundaries themselves (`Looping`, `WorkerStopping`, Octane's
+  `RequestTerminated`) can never fire there, so leaving the flag on costs a few listener entries at boot
+  — plus, in an application that dispatches `sync` jobs, building the flusher once to set a dirty flag
+  that nothing ever acts on.
 
   Also consider it when **synchronous export per unit of work becomes a measurable cost** — a
   high-throughput queue, or a high-RPS Octane service (today the flush runs on every job and every
