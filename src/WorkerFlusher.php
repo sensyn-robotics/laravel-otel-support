@@ -178,10 +178,14 @@ class WorkerFlusher
             // Noop (forceFlush 無し) が返るので method_exists で守る。本パッケージが open-telemetry/sdk
             // を require しない (配線は消費側の env autoload に委ねる) 設計はこのガードで成り立っている。
             //
-            // transport/export の失敗はここでは扱わない: 配送失敗は exporter が catch して SDK ログに
-            // 記録し、transport が閉じていれば false が返るだけで、例外は投げない。worker はそのまま
-            // 処理を続ければよく、戻り値も見ない。残るのは processor / transport 層や SDK 内部ログの
-            // 想定外エラーで、それをここで飲む。
+            // ⚠️ `$provider->forceFlush()` が返す bool は**意図的に捨てている**。本メソッドが返す bool は
+            // 「配送が成功したか」ではなく「例外が出ずに完了したか」であり、両者は別物である。
+            //   - 配送失敗 (false) は exporter が catch して SDK ログに記録済みで、例外は投げない。
+            //   - そして **false を成功判定に混ぜて pending を残しても復旧しない**: BatchSpanProcessor は
+            //     forceFlush の時点でキューを消費し、export に失敗した span を再キューしないため、
+            //     次の境界で再 flush しても空のキューを流すだけになる。pending が永久に true のまま
+            //     以降の全境界で無意味な flush を繰り返す副作用だけが残る。
+            // よって「再試行して復旧できる失敗」だけを false にする。それが下の catch (想定外の例外) である。
             if (method_exists($provider, 'forceFlush')) {
                 $provider->forceFlush();
             }
