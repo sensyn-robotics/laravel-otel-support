@@ -1,0 +1,63 @@
+version: 2
+
+# Grouping policy follows fc-datastore: dependencies that are released together, or that have
+# to move as one generation, are bundled into a single pull request to cut CI runner time,
+# review load and dependency drift. A dependency that matches several groups is assigned to
+# the group declared *first*, so narrow groups come before broad ones.
+updates:
+  # The package's own requirements. There is no committed composer.lock (a library has to let
+  # consumers resolve their own graph), so Dependabot maintains the constraints in
+  # composer.json rather than pinned versions.
+  - package-ecosystem: composer
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Tokyo
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    groups:
+      # Declared before the laravel group on purpose: laravel/pint is a formatter with its own
+      # release cadence and has nothing to do with a framework release, but "laravel/*" would
+      # otherwise swallow it.
+      dev-tooling:
+        patterns:
+          - "laravel/pint"
+          - "phpstan/*"
+      # illuminate/* is five separate requirements cut from the same release, and the Testbench
+      # major tracks the framework major 1:1 - one pull request per Laravel release, not six.
+      laravel:
+        patterns:
+          - "illuminate/*"
+          - "laravel/*"
+          - "orchestra/testbench"
+      # OTel PHP splits into stable packages (api, context, sdk) and experimental ones on a
+      # different version line, and a mixed generation breaks - so they are updated as a unit,
+      # majors included. Same reasoning as the opentelemetry group in fc-datastore.
+      opentelemetry:
+        patterns:
+          - "open-telemetry/*"
+      testing:
+        patterns:
+          - "phpunit/*"
+          - "mockery/mockery"
+
+  # Keeps the commit SHA pins in .github/workflows/ up to date: Dependabot reads the version
+  # from the comment after the pin, bumps the SHA and rewrites that comment.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Tokyo
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    groups:
+      # One pull request for every action that has a new release, instead of one each.
+      all-actions:
+        patterns:
+          - "*"

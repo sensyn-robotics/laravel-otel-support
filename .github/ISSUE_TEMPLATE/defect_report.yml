@@ -1,0 +1,74 @@
+name: Defect report
+description: Report something that looks broken in this package (read the support policy first)
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before you write anything:** this package is published for internal use at Sensyn
+        Robotics, Inc. It lives on public GitHub only so that our own Laravel applications can
+        install it with Composer as a VCS repository. It is not a general-purpose community
+        package.
+
+        That means:
+
+        - We do **not** accept external contributions. Pull requests from outside Sensyn
+          Robotics are closed without review.
+        - Feature requests and support questions are **out of scope** and may be closed without
+          a response.
+        - Backward compatibility is maintained only as far as our own services require it, so
+          pin the version you depend on.
+        - Defect reports are read, but there is **no support commitment and no response SLA**.
+        - **Never report a security vulnerability here.** Go back and use
+          [private vulnerability reporting](https://github.com/sensyn-robotics/laravel-otel-support/security/advisories/new)
+          instead.
+
+        You are of course free to fork and modify the code under the terms of the Apache
+        License 2.0.
+
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Acknowledgements
+      options:
+        - label: >-
+            I have read
+            [CONTRIBUTING.md](https://github.com/sensyn-robotics/laravel-otel-support/blob/main/CONTRIBUTING.md)
+            and understand that this package is unsupported for external users.
+          required: true
+        - label: This is not a security vulnerability report.
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How to reproduce
+      description: The smallest set of steps, configuration or code that shows the problem.
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Version of this package, plus your PHP and Laravel versions.
+      placeholder: laravel-otel-support 0.1.0, PHP 8.4.1, Laravel 12.30.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Stack traces, relevant OTel environment variables, exporter configuration.
+    validations:
+      required: false
