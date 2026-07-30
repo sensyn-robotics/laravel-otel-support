@@ -177,7 +177,8 @@ inert.
   that means exports are heavily delayed, and lost outright if the process is SIGKILLed.
 - **`metrics.queue.enabled=false` — services that do not use queues, or only the `sync` driver.**
   `sync` jobs run inline in the dispatching process (an HTTP request, typically) and are deliberately
-  not counted, so the queue metrics would stay empty forever.
+  counted on neither side — not as an enqueue and not as a terminal outcome — so the queue metrics would
+  stay empty forever.
 - **`metrics.http.enabled=false`** — worker-only services with no HTTP surface.
 - **`metrics.enabled=false`** — services that should not emit the metrics signal at all (traces only).
 

@@ -373,7 +373,7 @@ class QueueMetricsTest extends TestCase
         $this->assertSame(RuntimeException::class, $this->attributesOf($metrics['laravel.queue.job.finished'])['error.type']);
     }
 
-    public function test_sync_driver_is_not_counted(): void
+    public function test_sync_driver_terminal_is_not_counted(): void
     {
         // sync は HTTP 側で計測されるので queue の終端には計上しない (成功カウントの水増し回避)。
         config(['queue.connections.otel-sync.driver' => 'sync']);
@@ -386,6 +386,48 @@ class QueueMetricsTest extends TestCase
         $metrics = $this->collectMetrics();
         $finished = $metrics['laravel.queue.job.finished'] ?? null;
         $this->assertTrue($finished === null || $this->dataPoints($finished) === []);
+    }
+
+    public function test_sync_driver_enqueue_is_not_counted(): void
+    {
+        // producer 側も終端側と同じく計上しない。sync はキューに入らずインライン実行なので backlog が
+        // 存在せず、enqueue だけ数えると sum(sent) - sum(finished) が永久に増える偽のバックログになる。
+        //
+        // 現行の SyncQueue::push() は enqueueUsing() を通らないので JobQueued はフレームワークからは
+        // 発火しない。イベントを直接投げて「sync は数えない」という契約側の不変条件を固定する。
+        config(['queue.connections.otel-sync.driver' => 'sync']);
+        $dispatcher = $this->subscribedDispatcher();
+
+        $dispatcher->dispatch($this->jobQueued('otel-sync', 'id-1', new FakeQueuedJob, 'emails'));
+
+        $metrics = $this->collectMetrics();
+        $sent = $metrics['messaging.client.sent.messages'] ?? null;
+        $this->assertTrue($sent === null || $this->dataPoints($sent) === []);
+    }
+
+    public function test_sync_driver_leaves_every_queue_metric_empty(): void
+    {
+        // 「sync だけを使う service では queue metrics は永遠に空」= README が宣言している契約そのもの。
+        // producer / consumer のどちらか片側だけ計上する退行 (= backlog の計算式が壊れた状態) を、
+        // メッセージ 1 件のライフサイクルを通してここで検知する。
+        config(['queue.connections.otel-sync.driver' => 'sync']);
+        $dispatcher = $this->subscribedDispatcher();
+        $job = $this->consumerJob(FakeQueuedJob::class);
+
+        $dispatcher->dispatch($this->jobQueued('otel-sync', 'id-1', new FakeQueuedJob, 'emails'));
+        $dispatcher->dispatch(new JobProcessing('otel-sync', $job));
+        $dispatcher->dispatch(new JobProcessed('otel-sync', $job));
+
+        $metrics = $this->collectMetrics();
+        // 失敗終端 (JobFailed) は成功終端と同じ recordTerminal を通るので、判定点はここで尽きている。
+        $names = ['messaging.client.sent.messages', 'laravel.queue.job.finished', 'laravel.queue.job.duration'];
+        foreach ($names as $name) {
+            $metric = $metrics[$name] ?? null;
+            $this->assertTrue(
+                $metric === null || $this->dataPoints($metric) === [],
+                "sync の data point が {$name} に出ている (producer / consumer の片側だけ直した?)。",
+            );
+        }
     }
 
     public function test_terminal_duration_is_recorded_in_seconds(): void

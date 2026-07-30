@@ -43,11 +43,13 @@ takes care of merging and publishing the config in one place (`metrics.*` in
     same metric emitted by other languages' instrumentation.
     - `messaging.system` is the Laravel queue driver mapped onto semconv's well-known values, which
       today means `sqs` → `aws_sqs`. Drivers with no well-known value (`redis`, `database`,
-      `beanstalkd`, `sync`, …) are passed through as the custom value semconv permits.
+      `beanstalkd`, …) are passed through as the custom value semconv permits. `sync` never appears,
+      because those jobs are not counted at all (see below).
     - `messaging.destination.name` is the name of the queue the message was really pushed to, so
       that it joins with the consumer-side attribute on `laravel.queue.job.*` (queue backlog =
       `sum(sent) - sum(finished)` per queue; the `sqs` driver needs the normalisation described
-      below for that to hold). It comes from `JobQueued::$queue` on Laravel 11+, and
+      below for that to hold, and the `sync` driver is left out of both sides so that the
+      subtraction stays meaningful). It comes from `JobQueued::$queue` on Laravel 11+, and
       falls back to the connection's default queue (`queue.connections.*.queue`) when the caller
       named no queue. On **Laravel 10 the event carries no queue name**, so the job's own
       destination (`onQueue()` / a `$queue` property) is used instead and a `Queue::pushOn()` that
@@ -82,8 +84,13 @@ takes care of merging and publishing the config in one place (`metrics.*` in
   - `laravel.queue.job.duration` (histogram):
     - carries `error.type` as well (same as the counter). Latency distributions differ between success
       and failure, so the duration can be split by `error.type`.
-- Jobs on the `sync` driver are not counted: they run inline in the dispatching process (an HTTP
-  request, typically).
+- Jobs on the `sync` driver are counted on **neither** side — not as an enqueue and not as a terminal
+  outcome. They run inline in the dispatching process (an HTTP request, typically), where
+  `http.server.request.duration` already covers the time they take, and they never sit in a queue, so
+  there is no backlog they could be part of: counting one of the two sides only would turn
+  `sum(sent) - sum(finished)` into a backlog that grows forever on a connection that can never have one.
+  A `sync` failure is thrown back to the caller synchronously, so it surfaces through the application's
+  own error handling rather than through this metric.
 - A job goes uncounted whenever recording it fails (a failing instrument, or a job whose payload-derived
   key cannot be read). The queue listeners run on the application's own call stack — `JobQueued` fires
   inline inside `dispatch()`, `JobProcessing` fires before `$job->fire()`, and the listener that writes

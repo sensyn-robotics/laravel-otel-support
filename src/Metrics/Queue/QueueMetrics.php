@@ -56,7 +56,8 @@ class QueueMetrics
      * 使う (MUST)、当てはまらなければカスタム値でよい (MAY)」としている。Laravel の driver 名のうち
      * well-known 値を持つのは sqs だけで (1.38.0 の well-known 値は activemq / aws.sns / aws_sqs /
      * eventgrid / eventhubs / servicebus / gcp_pubsub / jms / kafka / pulsar / rabbitmq / rocketmq)、
-     * redis / database / beanstalkd / sync には対応値が無いので driver 名をそのままカスタム値として出す。
+     * redis / database / beanstalkd には対応値が無いので driver 名をそのままカスタム値として出す
+     * (sync も対応値を持たないが、そもそも計上しないので値が出ることは無い。理由は isCounted())。
      * 逆に kafka / rabbitmq 等の名前を持つサードパーティ driver は素通しで well-known 値に一致する。
      *
      * 値を直書きするのは open-telemetry/sem-conv が SDK 側の依存で、「runtime は api / context のみ」の
@@ -236,6 +237,12 @@ class QueueMetrics
     {
         $driver = $this->driver($e->connectionName);
 
+        // 終端側 (recordTerminal) とまったく同じ判定を通す。判定を 2 箇所に散らすと、片側だけ数える
+        // 非対称 (= backlog の計算式が壊れる) が再発する。
+        if (! $this->isCounted($driver)) {
+            return;
+        }
+
         $this->sent->add(1, [
             'messaging.system' => $this->toSemconvSystem($driver),
             'messaging.destination.name' => $this->producerDestination($e, $driver),
@@ -292,10 +299,11 @@ class QueueMetrics
         $begin = $this->start[$key] ?? null;
         unset($this->start[$key]);
 
-        // sync driver の job はディスパッチ元 (HTTP リクエスト等) でインライン実行され、その所要時間は
-        // HTTP metrics 側で計測される。queue の終端に混ぜると成功カウントが水増しされるので計上しない。
+        // 計上対象外の driver (sync) は終端を出さない。判定と理由は isCounted() に集約 (producer 側の
+        // doRecordEnqueued も同じ判定を通す)。開始時刻の掃除より後に置くこと (上の unset を飛ばすと
+        // sync connection の分だけ $start がリークする)。
         $driver = $this->driver($connection);
-        if ($driver === 'sync') {
+        if (! $this->isCounted($driver)) {
             return;
         }
 
@@ -328,6 +336,29 @@ class QueueMetrics
     private function key(Job $job): string
     {
         return (string) ($job->uuid() ?? $job->getJobId());
+    }
+
+    /**
+     * その driver の job を計上するか。producer (doRecordEnqueued) と consumer (recordTerminal) の
+     * **両方**がこの 1 箇所を通る。
+     *
+     * sync driver の job はキューに入らず、ディスパッチ元 (HTTP リクエスト等) でインライン実行される。
+     * 所要時間は HTTP metrics 側が既に計測しているので queue の終端に混ぜると成功カウントが水増しされ、
+     * そもそもキューが無いので backlog という概念も存在しない。したがって片側だけ数えると、doc が示す
+     * backlog = sum(sent) - sum(finished) が sync だけの connection で「増え続けるバックログ」に見える
+     * (sent だけが伸びる)。判定を両側で共有するのは、この非対称を構造的に起こさないため。
+     * sync の失敗は呼び出し元へ同期的に throw される (SyncQueue::handleException) ので、可視化は
+     * アプリ側のエラーハンドリングと trace が担う。
+     *
+     * なお Laravel 10〜13 の SyncQueue::push() は enqueueUsing() を通らない = JobQueued を発火しないため、
+     * producer 側の判定は現状フレームワーク経由では到達しない。それでも両側に置くのは (a) 「sync は
+     * 数えない」という公開契約 (src/Metrics/README.md) を実装で固定するため、(b) driver 名 'sync' で
+     * 登録された独自 connector や upstream の変更で発火し始めた時に、黙って片側だけ数える状態に
+     * 戻らないようにするため。
+     */
+    private function isCounted(string $driver): bool
+    {
+        return $driver !== 'sync';
     }
 
     private function toSemconvSystem(string $driver): string
