@@ -17,6 +17,8 @@ use OpenTelemetry\SDK\Metrics\MetricReader\ExportingReader;
 use OpenTelemetry\SDK\Trace\SpanExporter\InMemoryExporter;
 use OpenTelemetry\SDK\Trace\SpanProcessor\BatchSpanProcessor;
 use OpenTelemetry\SDK\Trace\TracerProvider;
+use OpenTelemetry\SDK\Trace\TracerProviderInterface as SdkTracerProvider;
+use RuntimeException;
 use Sensyn\LaravelOTelSupport\Tests\TestCase;
 use Sensyn\LaravelOTelSupport\WorkerFlusher;
 
@@ -125,6 +127,89 @@ class WorkerFlusherTest extends TestCase
         $dispatcher->dispatch(new WorkerStopping);
 
         $this->assertCount(1, $this->spanExporter->getSpans());
+    }
+
+    /**
+     * forceFlush が投げる TracerProvider。呼ばれた回数を $attempts に積むので到達確認ができる。
+     *
+     * API の provider interface に forceFlush は無く SDK 実装にしか無い (WorkerFlusher は method_exists で
+     * 判定する) ため、mock も SDK の interface で作る。そうしないと method_exists が false になり、
+     * flush が呼ばれない = 何も再現しないテストになる。
+     */
+    private function tracerProviderThatFailsToFlush(int &$attempts): SdkTracerProvider
+    {
+        $provider = Mockery::mock(SdkTracerProvider::class);
+        $provider->shouldReceive('forceFlush')->andReturnUsing(function () use (&$attempts): bool {
+            $attempts++;
+            throw new RuntimeException('force flush exploded');
+        });
+
+        return $provider;
+    }
+
+    public function test_looping_flush_failure_does_not_propagate_or_halt_the_worker(): void
+    {
+        // Looping は Worker::daemonShouldRun() から発火し、daemon() の while にも WorkCommand にも
+        // try/catch が無い。例外が漏れると queue:work が exit 1 で死ぬ (k8s ではジョブごとに再起動)。
+        $attempts = 0;
+        $flusher = new WorkerFlusher($this->tracerProviderThatFailsToFlush($attempts), $this->meterProvider);
+        $dispatcher = new Dispatcher;
+        $flusher->subscribe($dispatcher);
+
+        $dispatcher->dispatch(new JobProcessing('redis', Mockery::mock(Job::class)));
+
+        // until() が false を返すと daemonShouldRun() が worker を止めるので、そこも同時に見る。
+        $this->assertNotFalse($dispatcher->until(new Looping('redis', 'default')));
+        $this->assertSame(1, $attempts, 'flush (forceFlush) まで到達している必要がある。');
+    }
+
+    public function test_worker_stopping_flush_failure_does_not_propagate(): void
+    {
+        // WorkerStopping は Worker::kill() (job timeout の SIGALRM handler) からも発火し、その直後に
+        // posix_kill/exit がある。例外が漏れるとプロセスが死なず、job 実行中の任意の点に着弾した例外が
+        // job 側の try/catch に食われて timeout の強制終了そのものが無効化されうる。
+        $attempts = 0;
+        $flusher = new WorkerFlusher($this->tracerProviderThatFailsToFlush($attempts), $this->meterProvider);
+        $dispatcher = new Dispatcher;
+        $flusher->subscribe($dispatcher);
+
+        $dispatcher->dispatch(new JobProcessing('redis', Mockery::mock(Job::class)));
+        $dispatcher->dispatch(new WorkerStopping);
+
+        $this->assertSame(1, $attempts, 'flush (forceFlush) まで到達している必要がある。');
+    }
+
+    public function test_failed_flush_is_retried_on_the_next_loop(): void
+    {
+        // 失敗した flush は dirty フラグを落とさない = 次の周回で再試行される (先に落とすと、投げた
+        // flush 分の signal が誰にも送られず黙って失われる)。成功したら落ちるので、その後のアイドル
+        // 周回は no-op に戻る。
+        $attempts = 0;
+        $tracerProvider = Mockery::mock(SdkTracerProvider::class);
+        $tracerProvider->shouldReceive('forceFlush')->andReturnUsing(function () use (&$attempts): bool {
+            $attempts++;
+            if ($attempts === 1) {
+                throw new RuntimeException('force flush exploded');
+            }
+
+            return true;
+        });
+
+        $flusher = new WorkerFlusher($tracerProvider, $this->meterProvider);
+        $dispatcher = new Dispatcher;
+        $flusher->subscribe($dispatcher);
+
+        $dispatcher->dispatch(new JobProcessing('redis', Mockery::mock(Job::class)));
+        $dispatcher->until(new Looping('redis', 'default'));
+        $this->assertSame(1, $attempts);
+
+        // ジョブは増えていないが、前回の flush が失敗しているので再試行される。
+        $dispatcher->until(new Looping('redis', 'default'));
+        $this->assertSame(2, $attempts, '失敗した flush は次の Looping で再試行される必要がある。');
+
+        // 2 回目は成功したので、以降のアイドル周回では flush しない。
+        $dispatcher->until(new Looping('redis', 'default'));
+        $this->assertSame(2, $attempts, 'flush 成功後のアイドル周回は no-op である必要がある。');
     }
 
     public function test_pending_resets_so_idle_loop_after_flush_is_a_noop(): void

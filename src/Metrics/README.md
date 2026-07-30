@@ -55,6 +55,12 @@ takes care of merging and publishing the config in one place (`metrics.*` in
       and failure, so the duration can be split by `error.type`.
 - Jobs on the `sync` driver are not counted: they run inline in the dispatching process (an HTTP
   request, typically).
+- A job goes uncounted whenever recording it fails (a failing instrument, or a job whose payload-derived
+  key cannot be read). The queue listeners run on the application's own call stack — `JobQueued` fires
+  inline inside `dispatch()`, `JobProcessing` fires before `$job->fire()`, and the listener that writes
+  `failed_jobs` is registered *after* ours on `JobFailed` — so the instrumentation never lets its own
+  failure escape, and it never logs one either. See
+  [the fail-open contract](../../README.md#the-instrumentation-never-breaks-the-application).
 
 ## Registration
 

@@ -122,6 +122,34 @@ Installing this package on a service that has no OTel wiring yet is therefore ha
 holds when only some signals are exported. **If the only thing missing is an enabled exporter, leave
 the flags at their default `true`.**
 
+### The instrumentation never breaks the application
+
+Telemetry is not worth an outage, so every entry point the framework calls into is fail-open: the
+instrumentation contains its own failures and gives up on the measurement rather than letting an
+exception reach the application.
+
+- **Building the instruments** — an invalid bucket list, a logger that throws while reporting it, a
+  failing `Globals` initialisation — falls back to the API's Noop instruments. This is handled where
+  the meter provider is *resolved* as well as inside the constructors, because the container resolves
+  the constructor argument before the constructor body runs: the middleware is built twice per request
+  (in the pipeline and again in `Kernel::terminateMiddleware`) and the queue listeners are resolved on
+  every event, so a failure there would otherwise mean a 500 for every request, a truncated `terminate`
+  chain (`defer()` work and terminating callbacks silently dropped), or an exception surfacing in
+  whatever called `dispatch()`.
+- **Recording** — the queue listeners and the middleware's `terminate()` — drops the data point.
+- **Flushing** — `WorkerFlusher` keeps the worker process alive, and the dirty flag survives the
+  failure, so the flush is retried on the next `Looping`.
+
+None of this is logged. The logger is a failure source of its own, and these paths run per request and
+per job, so a log line would amplify the problem instead of reporting it. **A failure therefore shows up
+as missing telemetry, never as changed application behaviour**; when data goes missing, look for the
+cause in the OTel SDK's own diagnostics rather than the application log.
+
+One thing is deliberately *not* fail-open: wiring `WorkerFlusher`, which happens once during the
+provider's `boot()` on console processes only. There is no job in flight and nothing half-done to
+corrupt at that point, so a failure there should stop the artisan command visibly rather than leave a
+worker running with silently broken telemetry.
+
 ### Flags a consumer should consider turning off
 
 The cases below are the ones where leaving a flag on is wasteful or misleading, rather than merely

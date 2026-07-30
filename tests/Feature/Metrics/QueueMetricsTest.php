@@ -2,12 +2,21 @@
 
 namespace Sensyn\LaravelOTelSupport\Tests\Feature\Metrics;
 
+use Closure;
 use Illuminate\Contracts\Queue\Job;
 use Illuminate\Events\Dispatcher;
+use Illuminate\Queue\Events\JobExceptionOccurred;
 use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
 use Mockery;
+use OpenTelemetry\API\Metrics\CounterInterface;
+use OpenTelemetry\API\Metrics\HistogramInterface;
+use OpenTelemetry\API\Metrics\MeterInterface;
+use OpenTelemetry\API\Metrics\MeterProviderInterface;
+use OpenTelemetry\API\Metrics\Noop\NoopCounter;
+use OpenTelemetry\API\Metrics\Noop\NoopHistogram;
+use ReflectionProperty;
 use RuntimeException;
 use Sensyn\LaravelOTelSupport\Metrics\Queue\QueueMetrics;
 use Sensyn\LaravelOTelSupport\Tests\Support\FakeQueuedJob;
@@ -210,5 +219,196 @@ class QueueMetricsTest extends TestCase
         config(['otel-support.metrics.queue.duration_buckets' => ['oops']]);
 
         $this->assertInstanceOf(QueueMetrics::class, new QueueMetrics($this->meterProvider));
+    }
+
+    public function test_instrument_failures_do_not_propagate_from_any_listener(): void
+    {
+        // queue の listener はアプリ本来の処理と同じコールスタックで走る。JobQueued は push 直後に
+        // インライン発火して dispatch() の呼び出し元まで伝播し (トランザクション / afterCommit /
+        // Bus::batch が壊れる)、JobProcessing は $job->fire() より前なので未実行の job が release や
+        // 偽 failure になる。ここで例外を漏らさないことを 5 イベント全部で固定する。
+        $calls = [];
+        $dispatcher = new Dispatcher;
+        (new QueueMetrics($this->providerWithFailingInstruments($calls)))->subscribe($dispatcher);
+        $job = $this->consumerJob(FakeQueuedJob::class);
+
+        $dispatcher->dispatch($this->jobQueued(self::CONN, 'id-1', new FakeQueuedJob));
+        $dispatcher->dispatch(new JobProcessing(self::CONN, $job));
+        $dispatcher->dispatch(new JobProcessed(self::CONN, $job));
+        $dispatcher->dispatch(new JobFailed(self::CONN, $job, new RuntimeException('boom')));
+        $dispatcher->dispatch(new JobExceptionOccurred(self::CONN, $job, new RuntimeException('boom')));
+
+        // instrument に到達した 3 件 (enqueue / 成功終端 / 失敗終端)。markStarted と forgetStart は
+        // instrument に触らないので、そちらの入口は job key 経路のテストで見る。
+        $this->assertSame([
+            'messaging.client.sent.messages',
+            'laravel.queue.job.finished',
+            'laravel.queue.job.finished',
+        ], $calls, 'listener が instrument の呼び出しまで到達している必要がある (到達しないなら無意味なテスト)。');
+    }
+
+    public function test_duration_failure_after_a_successful_counter_does_not_propagate(): void
+    {
+        // 終端記録の途中で失敗するケース (counter は成功、histogram が投げる)。部分的な失敗でも
+        // listener の外に漏らさない。
+        $calls = [];
+        $counter = Mockery::mock(CounterInterface::class);
+        $counter->shouldReceive('add')->andReturnUsing(function () use (&$calls): void {
+            $calls[] = 'add';
+        });
+        $histogram = Mockery::mock(HistogramInterface::class);
+        $histogram->shouldReceive('record')->andReturnUsing(function () use (&$calls): void {
+            $calls[] = 'record';
+            throw new RuntimeException('histogram exploded');
+        });
+        $meter = Mockery::mock(MeterInterface::class);
+        $meter->shouldReceive('createCounter')->andReturn($counter);
+        $meter->shouldReceive('createHistogram')->andReturn($histogram);
+        $meterProvider = Mockery::mock(MeterProviderInterface::class);
+        $meterProvider->shouldReceive('getMeter')->andReturn($meter);
+
+        $dispatcher = new Dispatcher;
+        (new QueueMetrics($meterProvider))->subscribe($dispatcher);
+        $job = $this->consumerJob(FakeQueuedJob::class);
+
+        $dispatcher->dispatch(new JobProcessing(self::CONN, $job));
+        $dispatcher->dispatch(new JobProcessed(self::CONN, $job));
+
+        $this->assertSame(['add', 'record'], $calls, 'counter の後 histogram まで到達している必要がある。');
+    }
+
+    public function test_job_key_failures_do_not_propagate_from_any_listener(): void
+    {
+        // instrument に触らない入口 (markStarted / forgetStart) も含めて守れていること。key() は
+        // payload 由来の uuid()/getJobId() を読むので、同じキューに書ける内部 producer が細工した
+        // payload だと job 実装側で壊れる (生 body が JSON でなければ payload() が null になり
+        // ['uuid'] へのアクセスが warning -> Laravel の HandleExceptions が ErrorException にする)。
+        $attempts = 0;
+        $job = $this->jobWithFailingKey($attempts);
+        $dispatcher = new Dispatcher;
+        (new QueueMetrics($this->meterProvider))->subscribe($dispatcher);
+
+        $dispatcher->dispatch(new JobProcessing(self::CONN, $job));
+        $dispatcher->dispatch(new JobProcessed(self::CONN, $job));
+        $dispatcher->dispatch(new JobFailed(self::CONN, $job, new RuntimeException('boom')));
+        $dispatcher->dispatch(new JobExceptionOccurred(self::CONN, $job, new RuntimeException('boom')));
+
+        $this->assertSame(4, $attempts, '4 イベントすべてが key() まで到達している必要がある。');
+    }
+
+    public function test_later_listeners_still_run_when_recording_fails(): void
+    {
+        // listener の登録順は「provider の boot (本計装) → コマンドの handle」。JobFailed の後ろには
+        // WorkCommand::listenForEvents() が登録する logFailedJob (failed_jobs への insert) が並ぶので、
+        // ここで投げると Dispatcher が後続 listener を呼ばず、payload がキューからも failed_jobs からも
+        // 消えて queue:retry すらできなくなる (JobProcessed 側でも worker の success 出力や
+        // アプリの後処理が同様に飛ぶ)。
+        $calls = [];
+        $dispatcher = new Dispatcher;
+        (new QueueMetrics($this->providerWithFailingInstruments($calls)))->subscribe($dispatcher);
+
+        $ran = [];
+        $dispatcher->listen(JobFailed::class, function () use (&$ran): void {
+            $ran[] = JobFailed::class;
+        });
+        $dispatcher->listen(JobProcessed::class, function () use (&$ran): void {
+            $ran[] = JobProcessed::class;
+        });
+
+        $job = $this->consumerJob(FakeQueuedJob::class);
+        $dispatcher->dispatch(new JobFailed(self::CONN, $job, new RuntimeException('boom')));
+        $dispatcher->dispatch(new JobProcessed(self::CONN, $job));
+
+        $this->assertSame([JobFailed::class, JobProcessed::class], $ran);
+        $this->assertSame(
+            ['laravel.queue.job.finished', 'laravel.queue.job.finished'],
+            $calls,
+            '計装が実際に投げる所まで到達している必要がある (到達しなければ後続が走るのは当たり前)。',
+        );
+    }
+
+    public function test_constructor_failure_falls_back_to_noop_instruments(): void
+    {
+        $attempts = 0;
+        $meterProvider = Mockery::mock(MeterProviderInterface::class);
+        $meterProvider->shouldReceive('getMeter')->andReturnUsing(function () use (&$attempts): MeterInterface {
+            $attempts++;
+            throw new RuntimeException('meter provider exploded');
+        });
+
+        $metrics = new QueueMetrics($meterProvider);
+        $this->assertSame(1, $attempts, 'constructor は getMeter() まで到達している必要がある。');
+
+        // Noop であることまで見る: フォールバックの代入だけを落とすと「未初期化プロパティ = Error」が
+        // guard() に飲まれて黙るので、「例外が出ない」だけではガードの半分が抜けても気付けない。
+        $expected = ['sent' => NoopCounter::class, 'finished' => NoopCounter::class, 'duration' => NoopHistogram::class];
+        foreach ($expected as $property => $class) {
+            $this->assertInstanceOf(
+                $class,
+                (new ReflectionProperty(QueueMetrics::class, $property))->getValue($metrics),
+                "instrument の構築に失敗したら {$property} は Noop instrument に倒す必要がある。",
+            );
+        }
+
+        // フォールバック済みのインスタンスで 5 イベントすべてが無害に通る。
+        $dispatcher = new Dispatcher;
+        $metrics->subscribe($dispatcher);
+        $job = $this->consumerJob(FakeQueuedJob::class);
+
+        $dispatcher->dispatch($this->jobQueued(self::CONN, 'id-1', new FakeQueuedJob));
+        $dispatcher->dispatch(new JobProcessing(self::CONN, $job));
+        $dispatcher->dispatch(new JobProcessed(self::CONN, $job));
+        $dispatcher->dispatch(new JobFailed(self::CONN, $job, new RuntimeException('boom')));
+        $dispatcher->dispatch(new JobExceptionOccurred(self::CONN, $job, new RuntimeException('boom')));
+    }
+
+    /**
+     * instrument が「呼ばれた記録を残してから投げる」MeterProvider。到達確認ができるので、テストが
+     * 「計装に届いていないだけ」= vacuous にならない。
+     *
+     * @param  list<string>  $calls  記録に失敗した instrument 名が積まれる
+     */
+    private function providerWithFailingInstruments(array &$calls): MeterProviderInterface
+    {
+        $failWith = static function (string $name) use (&$calls): Closure {
+            return static function () use ($name, &$calls): void {
+                $calls[] = $name;
+                throw new RuntimeException($name.' exploded');
+            };
+        };
+
+        $meter = Mockery::mock(MeterInterface::class);
+        $meter->shouldReceive('createCounter')->andReturnUsing(function (string $name) use ($failWith): CounterInterface {
+            $counter = Mockery::mock(CounterInterface::class);
+            $counter->shouldReceive('add')->andReturnUsing($failWith($name));
+
+            return $counter;
+        });
+        $meter->shouldReceive('createHistogram')->andReturnUsing(function (string $name) use ($failWith): HistogramInterface {
+            $histogram = Mockery::mock(HistogramInterface::class);
+            $histogram->shouldReceive('record')->andReturnUsing($failWith($name));
+
+            return $histogram;
+        });
+
+        $meterProvider = Mockery::mock(MeterProviderInterface::class);
+        $meterProvider->shouldReceive('getMeter')->andReturn($meter);
+
+        return $meterProvider;
+    }
+
+    /** key() の元になる payload 由来の値の取得が失敗する job double ($attempts に到達回数を積む)。 */
+    private function jobWithFailingKey(int &$attempts): Job
+    {
+        $job = Mockery::mock(Job::class);
+        $job->shouldReceive('uuid')->andReturnUsing(function () use (&$attempts): ?string {
+            $attempts++;
+            throw new RuntimeException('job payload is not decodable');
+        });
+        // 終端判定は key() より先に見られるので、そこは正常値を返す。
+        $job->shouldReceive('isReleased')->andReturn(false);
+        $job->shouldReceive('hasFailed')->andReturn(false);
+
+        return $job;
     }
 }

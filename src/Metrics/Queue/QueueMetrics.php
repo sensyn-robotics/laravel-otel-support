@@ -2,6 +2,7 @@
 
 namespace Sensyn\LaravelOTelSupport\Metrics\Queue;
 
+use Closure;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Queue\Job;
 use Illuminate\Queue\Events\JobExceptionOccurred;
@@ -13,7 +14,9 @@ use Illuminate\Support\Facades\Config;
 use OpenTelemetry\API\Metrics\CounterInterface;
 use OpenTelemetry\API\Metrics\HistogramInterface;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
+use OpenTelemetry\API\Metrics\Noop\NoopMeter;
 use Sensyn\LaravelOTelSupport\Metrics\Buckets;
+use Throwable;
 
 /**
  * queue/messaging の metrics を記録する。
@@ -51,27 +54,45 @@ class QueueMetrics
 
     public function __construct(MeterProviderInterface $meterProvider)
     {
-        $buckets = Buckets::fromConfig('otel-support.metrics.queue.duration_buckets', Buckets::DEFAULT_QUEUE);
+        try {
+            $buckets = Buckets::fromConfig('otel-support.metrics.queue.duration_buckets', Buckets::DEFAULT_QUEUE);
 
-        // MeterProvider は provider が container に bind する (Globals 依存は app 側に閉じる)。
-        $meter = $meterProvider->getMeter('laravel-otel-support.metrics.queue');
+            // MeterProvider は provider が container に bind する (Globals 依存は app 側に閉じる)。
+            $meter = $meterProvider->getMeter('laravel-otel-support.metrics.queue');
 
-        $this->sent = $meter->createCounter(
-            'messaging.client.sent.messages',
-            '{message}',
-            'Number of enqueued messages',
-        );
-        $this->finished = $meter->createCounter(
-            'laravel.queue.job.finished',
-            '{job}',
-            'Jobs reaching a terminal outcome (success or final failure)',
-        );
-        $this->duration = $meter->createHistogram(
-            'laravel.queue.job.duration',
-            's',
-            'Duration of the terminal job attempt',
-            ['ExplicitBucketBoundaries' => $buckets],
-        );
+            $this->sent = $meter->createCounter(
+                'messaging.client.sent.messages',
+                '{message}',
+                'Number of enqueued messages',
+            );
+            $this->finished = $meter->createCounter(
+                'laravel.queue.job.finished',
+                '{job}',
+                'Jobs reaching a terminal outcome (success or final failure)',
+            );
+            $this->duration = $meter->createHistogram(
+                'laravel.queue.job.duration',
+                's',
+                'Duration of the terminal job attempt',
+                ['ExplicitBucketBoundaries' => $buckets],
+            );
+        } catch (Throwable) {
+            // 構築の失敗も listener と同じく飲む (理由は guard())。ここは subscribeLazily による遅延解決
+            // なので、構築は「queue イベントの初回発火点」= アプリの dispatch() 内 (JobQueued) か worker の
+            // JobProcessing で走る。つまり投げれば着弾点はその発火点そのもので、guard() が守っている
+            // blast radius (dispatch() 呼び出し元への伝播 / 未実行 job の release・偽 failure) を
+            // そのまま引き起こす。しかも singleton は失敗した構築をキャッシュしないため、以後の全
+            // イベントで投げ続ける。handler 本体の try/catch では救えない (Dispatcher が本体呼び出しの
+            // 前に make() する) ので、ここで受ける必要がある。
+            //
+            // 現実的なトリガは config 側: Buckets::fromConfig() が不正値で出す Log::warning と
+            // facade root 未設定。フォールバックは config も logger も触らない Noop instrument にする
+            // (フォールバック自身が新たな throw 源にならないこと)。
+            $noop = new NoopMeter;
+            $this->sent = $noop->createCounter('messaging.client.sent.messages');
+            $this->finished = $noop->createCounter('laravel.queue.job.finished');
+            $this->duration = $noop->createHistogram('laravel.queue.job.duration');
+        }
     }
 
     /**
@@ -107,6 +128,77 @@ class QueueMetrics
 
     public function recordEnqueued(JobQueued $e): void
     {
+        $this->guard(function () use ($e): void {
+            $this->doRecordEnqueued($e);
+        });
+    }
+
+    public function markStarted(JobProcessing $e): void
+    {
+        $this->guard(function () use ($e): void {
+            $this->doMarkStarted($e);
+        });
+    }
+
+    public function recordProcessed(JobProcessed $e): void
+    {
+        $this->guard(function () use ($e): void {
+            $this->doRecordProcessed($e);
+        });
+    }
+
+    public function recordFailed(JobFailed $e): void
+    {
+        $this->guard(function () use ($e): void {
+            $this->doRecordFailed($e);
+        });
+    }
+
+    public function forgetStart(JobExceptionOccurred $e): void
+    {
+        $this->guard(function () use ($e): void {
+            $this->doForgetStart($e);
+        });
+    }
+
+    /**
+     * Laravel が呼ぶ listener の入口で計装の例外を封じ込める (HttpServerMetrics::terminate() と同じ形:
+     * public な入口で try/catch(Throwable) → 実処理は private に委譲 → ログは出さない)。
+     *
+     * queue イベントの listener はアプリ本来の処理と同じコールスタックで走り、囲む側に try/catch が
+     * 無い、あるいは catch が job の失敗として扱うため、ここで投げると計装と無関係な壊れ方をする:
+     *   - JobQueued は Queue::enqueueUsing() の tap() 内 = push 直後にインラインで発火し、Bus\Dispatcher に
+     *     catch が無いので dispatch() の呼び出し元まで伝播する。トランザクション内なら「broker には
+     *     残っているのに参照先の行はロールバックされた孤児 job」、afterCommit 経路なら「commit 済みなのに
+     *     DB::transaction() が throw + 残りの afterCommit callback が全部落ちる」、Bus::batch なら
+     *     「途中まで push した batch が永久に完了しない」。
+     *   - JobProcessing は $job->fire() より前 (Worker::process) なので、投げると job が未実行のまま
+     *     release / 偽 failure になる。maxTries=0 なら永久 release ループ = poison pill でキューが止まり、
+     *     worker 自身は健全に見えるサイレント障害になる。
+     *   - JobProcessed / JobFailed / JobExceptionOccurred では、登録順で後ろにいる listener が全部
+     *     スキップされる。特に JobFailed の後ろには WorkCommand::listenForEvents() が handle() 時に
+     *     (= provider boot で登録した本 listener より後に) 登録する logFailedJob がいるため、投げると
+     *     failed_jobs への insert に到達せず、payload がキューからも failed_jobs からも消えて
+     *     queue:retry もできなくなる。さらに元の job 例外が計装の例外に差し替わって報告される。
+     *
+     * 計装の失敗は telemetry の欠損として出す方がアプリの挙動を変えるより望ましいので、記録を諦める。
+     * ログは出さない: (a) Log::warning 自体が新たな throw 源 (Monolog の channel 未定義 / 書き込み不能)、
+     * (b) poison pill 化した job が無限に release されるとログも無限に増える。可観測性が必要になったら
+     * OTel 内部ログ (LogsMessagesTrait) 側に寄せる。
+     *
+     * @param  Closure(): void  $work
+     */
+    private function guard(Closure $work): void
+    {
+        try {
+            $work();
+        } catch (Throwable) {
+            // 意図的に飲む (理由は上の docblock)。5 メソッドに catch をコピペせずここ 1 箇所に集約する。
+        }
+    }
+
+    private function doRecordEnqueued(JobQueued $e): void
+    {
         $this->sent->add(1, [
             'messaging.system' => $this->driver($e->connectionName),
             'messaging.destination.name' => $this->producerQueue($e),
@@ -115,7 +207,7 @@ class QueueMetrics
         ]);
     }
 
-    public function markStarted(JobProcessing $e): void
+    private function doMarkStarted(JobProcessing $e): void
     {
         if ($e->job instanceof Job) {
             $this->start[$this->key($e->job)] = microtime(true);
@@ -128,7 +220,7 @@ class QueueMetrics
      * (Worker::process)。release は終端でなく fail() は JobFailed で既に計上済みなので、どちらも
      * 成功として計上しない (isReleased/hasFailed でガード)。これを欠くと release/fail で多重計上する。
      */
-    public function recordProcessed(JobProcessed $e): void
+    private function doRecordProcessed(JobProcessed $e): void
     {
         if (! $e->job instanceof Job) {
             return;
@@ -142,7 +234,7 @@ class QueueMetrics
     }
 
     /** JobFailed は retry 尽き / 明示 fail / pre-exec の maxattempts 超過で発火 = 最終失敗。 */
-    public function recordFailed(JobFailed $e): void
+    private function doRecordFailed(JobFailed $e): void
     {
         if ($e->job instanceof Job) {
             $this->recordTerminal($e->connectionName, $e->job, $e->exception::class);
@@ -150,7 +242,7 @@ class QueueMetrics
     }
 
     /** retry される失敗 attempt は終端を持たない。開始時刻のリーク掃除のみ (terminal カウントしない)。 */
-    public function forgetStart(JobExceptionOccurred $e): void
+    private function doForgetStart(JobExceptionOccurred $e): void
     {
         if ($e->job instanceof Job) {
             unset($this->start[$this->key($e->job)]);

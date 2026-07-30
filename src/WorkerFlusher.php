@@ -8,6 +8,7 @@ use Illuminate\Queue\Events\Looping;
 use Illuminate\Queue\Events\WorkerStopping;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
 use OpenTelemetry\API\Trace\TracerProviderInterface;
+use Throwable;
 
 /**
  * queue worker のジョブ境界で OTel signal provider を flush する。
@@ -60,8 +61,26 @@ class WorkerFlusher
         if (! $this->pending) {
             return;
         }
-        $this->pending = false;
-        $this->flush();
+
+        try {
+            $this->flush();
+            // flush が成功した時だけ dirty フラグを落とす。先に落とすと、投げた flush 分の signal が
+            // 次の周回で再試行されず黙って失われる。
+            $this->pending = false;
+        } catch (Throwable) {
+            // flush の失敗は worker に漏らさない (Looping / WorkerStopping の listener はどちらも
+            // アプリ = worker 本体のコードパス上で、囲む側に catch が無い):
+            //   - Looping は Worker::daemonShouldRun() から発火し、daemon() の while にも WorkCommand にも
+            //     try/catch が無い。投げると artisan まで抜けて queue:work が exit 1 で死ぬ
+            //     (k8s ではジョブごとに再起動 = CrashLoop 相当でスループットが崩壊する)。
+            //   - WorkerStopping は 2 経路。Worker::stop() 経由では終了コードが本来の status から 1 に
+            //     化けて k8s の終了理由が誤判定される。Worker::kill() 経由 (job timeout の SIGALRM
+            //     handler) では dispatch の直後にある posix_kill/exit に到達できず、job のコード実行中の
+            //     任意の点に着弾した例外が job 側の try/catch に食われて、timeout の強制終了そのものが
+            //     無効化されうる。
+            // ジョブ自体は完了済みなのでロスは無く、pending は落とさないので次の Looping で再試行される。
+            // ログは出さない (guard 方針は HttpServerMetrics::terminate() と同じ: Log 自体が throw 源)。
+        }
     }
 
     private function flush(): void
@@ -79,7 +98,8 @@ class WorkerFlusher
         //
         // transport/export の失敗はここでは扱わない: 配送失敗は exporter が catch して SDK ログに記録し、
         // transport が閉じていれば false が返るだけで、例外は投げない。worker はそのまま処理を続ければよく、
-        // 戻り値も見ない。
+        // 戻り値も見ない。残るのは processor / transport 層や SDK 内部ログの想定外エラーで、それは
+        // flushIfPending() が飲む (worker プロセスを落とさないため)。
         if (method_exists($provider, 'forceFlush')) {
             $provider->forceFlush();
         }
