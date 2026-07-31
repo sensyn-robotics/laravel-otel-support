@@ -140,11 +140,15 @@ its floor stays in `composer.json`, which is why CI never pins `orchestra/testbe
   above. Everything else is `@internal`, even though the framework requires it to be `public`.
 - Every change to `src/` needs a matching test. New metrics or attributes must also be reflected in
   `src/Metrics/README.md`, including the semconv version that section declares.
-- **Documentation is written in English.** The repository is public, so `README.md`, this file and
-  `src/Metrics/README.md` are English; inline comments and docblocks in `src/` stay Japanese. Do not add
-  a translated copy of a document — a duplicate that drifts out of sync is worse than a single language.
+- **Documentation is written in English.** The repository is public, so `README.md`, this file,
+  `src/Metrics/README.md` and `CLAUDE.md` are English; inline comments and docblocks in `src/` stay
+  Japanese. Do not add a translated copy of a document — a duplicate that drifts out of sync is worse
+  than a single language.
 - Follow [Conventional Commits](https://www.conventionalcommits.org/) for commit messages, and open
-  pull requests as **draft** first.
+  pull requests as **draft** first. Every pull request needs an approval from
+  [`@sensyn-robotics/infra`](https://github.com/orgs/sensyn-robotics/teams/infra): the default branch
+  requires a code-owner review and [`.github/CODEOWNERS`](.github/CODEOWNERS) assigns the whole tree to
+  that team.
 
 ### Repository visibility
 
