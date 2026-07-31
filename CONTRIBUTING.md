@@ -62,6 +62,23 @@ composer install
 composer check      # format check + static analysis + tests (three of the five CI jobs)
 ```
 
+Install the secret-scanning hook as well — once per clone:
+
+```bash
+brew install pre-commit detect-secrets   # or the equivalent for your platform
+pre-commit install
+```
+
+This runs [detect-secrets](https://github.com/Yelp/detect-secrets) against `.secrets.baseline.json`
+before every commit. Setting up
+[sensyn-git-global-hook](https://github.com/sensyn-robotics/sensyn-git-global-hook) instead enables it
+for every repository at once. The same scan runs in CI, because `git commit --no-verify` walks past the
+hook — and this repository being public means a secret is readable the moment it is pushed.
+
+If the hook reports something that is not a secret, prefer an inline `pragma: allowlist secret` comment
+or an `exclude` pattern in `.secrets.baseline.json` over auditing the value into the baseline; commit the
+updated baseline before the commit that needs it, or the hook runs against the old file.
+
 The lock file is not committed (a library must let consumers resolve their own graph), so
 `composer install` resolves the newest supported combination your PHP version allows — Laravel 12 on
 PHP 8.2, Laravel 13 on PHP 8.3+, together with the newest Testbench and PHPUnit those permit. The other

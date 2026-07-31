@@ -95,9 +95,15 @@ This is not hypothetical — it has already been cleaned up twice, and both orig
 public: `4cc4232` removed an internal service name from a `ci.yml` comment, `c8efc49` removed an
 internal repository name from `dependabot.yml`.
 
-Secret scanning and push protection are enabled, but they look for credentials; neither flags a
-hostname or a queue name. Comments in `src/` are Japanese, which lowers the chance a reader spots one
-in passing. Check what you are pasting in.
+Credentials have two automated gates — GitHub secret scanning with push protection, and
+[detect-secrets](https://github.com/Yelp/detect-secrets), which runs both as a pre-commit hook and as
+the `Detect Secrets` workflow (the hook is bypassable with `git commit --no-verify`, the workflow is
+not). Neither gate flags a hostname or a queue name, and comments in `src/` are Japanese, which lowers
+the chance a reader spots one in passing. Check what you are pasting in.
+
+A detect-secrets false positive is best silenced with an inline `pragma: allowlist secret` comment or
+an `exclude` pattern in `.secrets.baseline.json`; commit the updated baseline first, or the hook still
+runs against the old one.
 
 ## Things that have to move together
 
