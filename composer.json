@@ -76,7 +76,7 @@
         "analyse": "Run PHPStan static analysis.",
         "format": "Format the code with Laravel Pint.",
         "format:check": "Check formatting with Laravel Pint without writing changes.",
-        "check": "Run format check, static analysis and tests (what CI runs)."
+        "check": "Run format check, static analysis and tests (three of the five CI jobs; runtime-dependencies and composer-validate are not included)."
     },
     "config": {
         "sort-packages": true,

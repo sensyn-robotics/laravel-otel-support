@@ -59,7 +59,7 @@ privately.
 
 ```bash
 composer install
-composer check      # format check + static analysis + tests (same as CI)
+composer check      # format check + static analysis + tests (three of the five CI jobs)
 ```
 
 The lock file is not committed (a library must let consumers resolve their own graph), so
@@ -145,10 +145,10 @@ its floor stays in `composer.json`, which is why CI never pins `orchestra/testbe
   Japanese. Do not add a translated copy of a document — a duplicate that drifts out of sync is worse
   than a single language.
 - Follow [Conventional Commits](https://www.conventionalcommits.org/) for commit messages, and open
-  pull requests as **draft** first. Every pull request needs an approval from
-  [`@sensyn-robotics/infra`](https://github.com/orgs/sensyn-robotics/teams/infra): the default branch
-  requires a code-owner review and [`.github/CODEOWNERS`](.github/CODEOWNERS) assigns the whole tree to
-  that team.
+  pull requests as **draft** first. Every pull request targeting the default branch needs an approval
+  from the `@sensyn-robotics/infra` team: that branch requires a code-owner review and
+  `.github/CODEOWNERS` assigns the whole tree to the team. A draft pull request does not request that
+  review automatically — mark it ready for review, or ask for the review by hand.
 
 ### Repository visibility
 

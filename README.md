@@ -215,7 +215,7 @@ composer install
 composer test        # phpunit (orchestra/testbench)
 composer analyse     # phpstan (level 8)
 composer format      # laravel/pint
-composer check       # all three of the above (what CI runs)
+composer check       # all three of the above (three of the five CI jobs)
 ```
 
 The supported Laravel 10–13 combinations are verified by the CI matrix

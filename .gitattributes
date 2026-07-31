@@ -13,3 +13,4 @@
 /phpunit.xml        export-ignore
 /phpstan.neon       export-ignore
 /CLAUDE.md          export-ignore
+/.claude/           export-ignore
