@@ -685,6 +685,39 @@ class QueueMetricsTest extends TestCase
         $this->assertSame('SendEmail', $attrs['laravel.queue.job.name']);
     }
 
+    /**
+     * **既知の限界を pin する。** Laravel 10 では、`Queue::pushOn($queue, $job)` で渡された宛先を
+     * producer 側から復元できない。framework の wrapper 4 系統のうち `CallQueuedListener` と
+     * `BroadcastEvent` がその形で、宛先は job にもイベントにも payload にも残らない。
+     *
+     * 結果、その 2 系統では producer が connection 既定キューを、consumer が実キューを報告し、
+     * キュー単位の `sum(sent) - sum(finished)` が割れる。直せないので、**誤った値が出ること自体を
+     * 固定して見えるようにしておく**。Laravel 11+ はイベントが宛先を持つので正しく出る。
+     */
+    public function test_destination_passed_only_to_push_on_is_unrecoverable_on_laravel_10(): void
+    {
+        config(['queue.connections.'.self::CONN.'.queue' => 'app-jobs']);
+        $dispatcher = $this->subscribedDispatcher();
+
+        // 実際の push 先は 'listeners'。Laravel 10 のイベントはこれを運ばない (helper が引数を落とす)。
+        $dispatcher->dispatch($this->jobQueued(self::CONN, 'id-1', new FakeWrappedQueuedJob, 'listeners'));
+
+        $attrs = $this->attributesOf($this->collectMetrics()['messaging.client.sent.messages']);
+
+        if ($this->jobQueuedCarriesQueue()) {
+            $this->assertSame('listeners', $attrs['messaging.destination.name']);
+
+            return;
+        }
+
+        $this->assertSame(
+            'app-jobs',
+            $attrs['messaging.destination.name'],
+            'Laravel 10 では pushOn の宛先を復元できず connection 既定キューに落ちる。'
+            .'この値が変わったなら復元手段ができたということなので、src/Metrics/README.md の限界の記述も見直すこと。',
+        );
+    }
+
     public function test_producer_job_name_is_the_class_when_there_is_no_display_name(): void
     {
         // wrapper でない素の job は get_class がそのまま payload の displayName になる (既存の挙動)。

@@ -137,11 +137,12 @@ exception reach the application.
 - **Building the instruments** — an invalid bucket list, a logger that throws while reporting it, a
   failing `Globals` initialisation — falls back to the API's Noop instruments. This is handled where
   the meter provider is *resolved* as well as inside the constructors, because the container resolves
-  the constructor argument before the constructor body runs: the middleware is built twice per request
-  (in the pipeline and again in `Kernel::terminateMiddleware`) and the queue listeners are resolved on
-  every event, so a failure there would otherwise mean a 500 for every request, a truncated `terminate`
-  chain (`defer()` work and terminating callbacks silently dropped), or an exception surfacing in
-  whatever called `dispatch()`.
+  the constructor argument before the constructor body runs: the middleware is resolved twice per
+  request (in the pipeline and again in `Kernel::terminateMiddleware`) and, while the singleton binding
+  means a *successful* construction happens once, **a failed one is not cached** — so the second resolve
+  runs the constructor again. The queue listeners are resolved on every event. A failure there would
+  otherwise mean a 500 for every request, a truncated `terminate` chain (`defer()` work and terminating
+  callbacks silently dropped), or an exception surfacing in whatever called `dispatch()`.
 - **Recording** — the queue listeners and the middleware's `terminate()` — drops the data point.
 - **Flushing** — `WorkerFlusher` keeps the worker process alive, and the dirty flag survives the
   failure, so the flush is retried on the next `Looping`.
@@ -153,8 +154,8 @@ missing, look for the cause in the OTel SDK's own diagnostics rather than the ap
 
 There is exactly one exception, and it is a configuration error rather than a runtime failure: an
 invalid bucket list logs a single `warning` naming the config key, from where the instrument is built.
-The middleware is constructed twice per request, so leaving a bad value in place means a steady stream
-of that line — treat it as something to fix, not to filter.
+The middleware is a singleton, so that is one line per request under FPM and one line per worker under
+Octane — still a steady stream if the value is left wrong. Treat it as something to fix, not to filter.
 
 Wiring is fail-open too. The provider only *registers listeners* during `boot()`; `WorkerFlusher` itself
 is built the first time one of those events fires, and the global tracer and meter providers are
@@ -176,6 +177,11 @@ inert.
   Also consider it when **synchronous export per unit of work becomes a measurable cost** — a
   high-throughput queue, or a high-RPS Octane service (today the flush runs on every job and every
   Octane request; deltas mean it does not double-count).
+
+  Note that traces and metrics are the only signals this flushes. The **logs signal is deliberately
+  out of scope**, because these services log to stdout rather than through an OTLP exporter — if that
+  ever changes, the logger provider has to be added here, or a long-lived worker's log records sit in
+  the batch processor until the process exits.
 
   Be aware of the trade-off: disabling it stops the flush of *both* traces and metrics and leaves
   everything to the SDK's shutdown flush at process exit. In a long-lived daemon or an Octane worker

@@ -16,7 +16,15 @@ namespace Sensyn\LaravelOTelSupport\Tests\Support;
  */
 class FakeWrappedQueuedJob
 {
-    public string $queue = 'emails';
+    /**
+     * 宛先キュー。**`null` を既定にしているのは実物に合わせるため。**
+     *
+     * framework の 4 wrapper のうち、job 自身に宛先が書かれるのは `SendQueuedMailable` (ctor で代入) と
+     * `SendQueuedNotifications` (`NotificationSender` が `->onQueue()`) だけで、`CallQueuedListener` と
+     * `BroadcastEvent` は `Queue::pushOn($queue, $job)` の引数として渡されるだけなので **job には残らない**。
+     * ここに値を入れておくと、Laravel 10 で producer が宛先を復元できないケースがテストから消える。
+     */
+    public ?string $queue = null;
 
     public function __construct(public readonly string $inner = FakeQueuedJob::class) {}
 

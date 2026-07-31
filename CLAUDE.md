@@ -122,9 +122,9 @@ runs against the old one.
   else is `@internal`, even where the framework forces it to be `public`.
 - Telemetry must never break the application. Every entry point the framework calls is fail-open, so a
   failure shows up as missing telemetry, not as changed behaviour. The recording and flushing paths do
-  not log; the one exception is `Buckets::fromConfig()` (`src/Metrics/Buckets.php:94`), which warns on an
-  invalid bucket list — and because the HTTP middleware is constructed twice per request, a bad value
-  there means a log line per request. Do not add a second one.
+  not log; the one exception is `Buckets::fromConfig()`, which warns on an invalid bucket list from
+  where the instrument is built. The middleware is a singleton, so that is one line per request under
+  FPM and one per worker under Octane. Do not add a second one.
 - [Conventional Commits](https://www.conventionalcommits.org/); open pull requests as **draft** first.
   Every pull request targeting `main` needs an approval from `@sensyn-robotics/infra` (see
   `.github/CODEOWNERS`). Note that a draft pull request does not request that review automatically —

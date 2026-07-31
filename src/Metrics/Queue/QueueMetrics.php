@@ -461,6 +461,22 @@ class QueueMetrics
         }
 
         // Laravel 10: イベントに宛先が無いので job 自身が onQueue 等で持つ宛先を読む。
+        //
+        // ⚠️ **これは Laravel 10 では常に正しいわけではない。** 宛先は job のプロパティに書かれる場合と、
+        // `Queue::pushOn($queue, $job)` の引数として渡されるだけの場合があり、後者はイベントからも
+        // payload からも復元できない。framework 自身が wrapper 4 系統のうち 2 つで後者を使う:
+        //
+        //   | wrapper                   | 宛先の渡り方                                    |
+        //   |---------------------------|-------------------------------------------------|
+        //   | SendQueuedMailable        | ctor が $this->queue に代入            -> 読める |
+        //   | SendQueuedNotifications   | NotificationSender が ->onQueue()      -> 読める |
+        //   | CallQueuedListener        | Dispatcher::queueHandler が pushOn()   -> 読めない |
+        //   | BroadcastEvent            | BroadcastManager が pushOn()           -> 読めない |
+        //
+        // 読めない 2 つでは producer が connection 既定キューを報告し、consumer は実キューを報告するため、
+        // キュー単位の sum(sent) - sum(finished) が割れる (既定キュー側が増え続け、実キュー側が負に見える)。
+        // Laravel 11+ はイベント自身が宛先を持つので影響しない。限界は src/Metrics/README.md に明記し、
+        // QueueMetricsTest の `queued listener / broadcast` ケースで既知の誤り値として pin してある。
         $job = $e->job;
         if (is_object($job) && isset($job->queue) && is_string($job->queue)) {
             return $job->queue;

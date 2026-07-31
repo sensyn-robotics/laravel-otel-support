@@ -149,9 +149,15 @@ class WorkerFlusher
     }
 
     /**
-     * 全 provider を flush して、すべて成功したかを返す。
+     * 対象 provider を flush して、すべて成功したかを返す。
      *
-     * @return bool すべての provider の flush が成功したか
+     * 対象は **traces と metrics の 2 signal のみ**。`Globals::loggerProvider()` は意図的に触っていない:
+     * このパッケージの消費側はログを stdout に出す運用で、OTLP logs exporter を使っていないため。
+     * **将来 OTLP でログを出す判断をしたら、ここに logger provider を足す必要がある** (足さないと、
+     * 長命 worker のログレコードがプロセス終了まで batch processor に滞留する = このクラスが解こうと
+     * している問題がログで再発する)。
+     *
+     * @return bool 対象 provider の flush がすべて成功したか
      */
     private function flush(): bool
     {

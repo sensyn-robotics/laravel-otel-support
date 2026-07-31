@@ -71,10 +71,12 @@ class HttpServerMetrics
                 );
         } catch (Throwable) {
             // 構築の失敗も terminate() と同じくアプリに漏らさない。この middleware は 1 リクエストで 2 回
-            // 構築される (request 経路 = global stack 先頭の pipe である Pipeline::carry() の make()、
-            // terminate 経路 = Kernel::terminateMiddleware() の make()) 上に、singleton は失敗した構築を
-            // キャッシュしないため、投げると全リクエストが 500 になり、さらに terminate 連鎖が途切れて
-            // defer() 済み処理と terminating callback が黙って消える (terminate() が避けている事象そのもの)。
+            // make される (request 経路 = global stack 先頭の pipe である Pipeline::carry()、terminate 経路
+            // = Kernel::terminateMiddleware()) が、singleton bind (MetricsServiceProvider::register) なので
+            // **成功すれば構築は 1 回**である。問題は失敗時で、**singleton は失敗した構築をキャッシュしない**
+            // ため 2 回目の make() で再び構築が走る。ここで投げると全リクエストが 500 になり、さらに
+            // terminate 連鎖が途切れて defer() 済み処理と terminating callback が黙って消える
+            // (terminate() が避けている事象そのもの)。
             //
             // 現実的なトリガは SDK ではなく config 側: Buckets::fromConfig() が不正値で出す Log::warning
             // (channel 未定義 / handler が書き込み不能 / カスタム handler の throw) と facade root 未設定。

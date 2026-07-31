@@ -49,8 +49,25 @@ takes care of merging and publishing the config in one place (`metrics.*` in
       subtraction stays meaningful). It comes from `JobQueued::$queue` on Laravel 11+, and
       falls back to the connection's default queue (`queue.connections.*.queue`) when the caller
       named no queue. On **Laravel 10 the event carries no queue name**, so the job's own
-      destination (`onQueue()` / a `$queue` property) is used instead and a `Queue::pushOn()` that
-      contradicts it cannot be seen.
+      destination (`onQueue()` / a `$queue` property) is used instead.
+
+      That fallback has a limit worth knowing about, because the framework itself hits it. A
+      destination handed to `Queue::pushOn($queue, $job)` is never written onto the job, so on
+      Laravel 10 it cannot be recovered from anywhere — not the event, not the payload. Of the four
+      wrappers the framework queues work in, two are pushed that way:
+
+      | wrapper | how the destination travels | recoverable on 10 |
+      |---|---|---|
+      | `SendQueuedMailable` (mail) | assigned in the constructor | yes |
+      | `SendQueuedNotifications` (notifications) | `NotificationSender` calls `->onQueue()` | yes |
+      | `CallQueuedListener` (queued listeners) | `Dispatcher::queueHandler` calls `pushOn()` | **no** |
+      | `BroadcastEvent` (broadcasts) | `BroadcastManager` calls `pushOn()` | **no** |
+
+      So a queued listener or a broadcast event with its own `$queue` is reported by the producer
+      under the connection's default queue while the consumer reports the real one, and the per-queue
+      `sum(sent) - sum(finished)` splits: the default queue grows without bound and the real queue goes
+      negative. **Laravel 11+ is unaffected** — the event carries the destination. The test suite pins
+      the wrong value so the limit stays visible rather than being mistaken for correct behaviour.
   - `http.server.request.duration`
     - carries `http.route` (the route template) only when routing matched; the raw path is never used.
     - `http.request.method` only ever holds a semconv known method or `_OTHER`, so the number of series
