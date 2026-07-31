@@ -4,7 +4,7 @@ OpenTelemetry metrics instrumentation and queue-worker signal flushing for Larav
 [`opentelemetry-auto-laravel`](https://github.com/opentelemetry-php/contrib-auto-laravel) and the OTel
 SDK autoloader.
 
-> **Note**
+> **Warning**
 > This package is published for internal use at Sensyn Robotics. It is provided as-is and we do not
 > accept external contributions — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -24,7 +24,7 @@ are left to the consuming application's env, which is why `open-telemetry/sdk` i
 
 | | |
 |---|---|
-| PHP | 8.1 or newer |
+| PHP | 8.2 or newer |
 | Laravel | 10.x / 11.x / 12.x / 13.x |
 | OpenTelemetry | `open-telemetry/api` ^1.9 / `open-telemetry/context` ^1.4 |
 

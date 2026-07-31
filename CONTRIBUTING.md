@@ -30,14 +30,9 @@ the minor position acts as the major.**
 - Patch releases (`0.1.0` → `0.1.1`) are backward compatible. `^0.1` in a consumer therefore never
   picks up a breaking change through an unrelated `composer update`.
 
-Two surfaces count as breaking beyond the obvious PHP signatures, because both break a consumer without
+One surface counts as breaking beyond the obvious PHP signatures, because it breaks a consumer without
 breaking any call site:
 
-- **The published config's dependency on `Buckets`.** `config/otel-support.php` calls
-  `Buckets::parse()` with `Buckets::DEFAULT_HTTP` / `DEFAULT_QUEUE`, and a consumer that published the
-  file keeps that call in its own repository. Changing those three members breaks config loading — which
-  happens before the framework boots, so every request 500s and the package's fail-open guarantees do not
-  apply. They are marked `@api`; the rest of `src/` is marked `@internal` and may change freely.
 - **Metric names, attribute keys and attribute values.** They are the contract that the consumers'
   dashboards, recording rules and alerts are written against. This includes adopting an upstream rename
   in the OpenTelemetry semantic conventions: the version this package targets is declared in
@@ -55,7 +50,7 @@ privately.
 
 ### Local setup
 
-**Development requires PHP 8.2 or newer**, even though the package itself supports PHP 8.1.
+**PHP 8.2 or newer**, matching the package's own floor.
 
 ```bash
 composer install
@@ -85,12 +80,10 @@ PHP 8.2, Laravel 13 on PHP 8.3+, together with the newest Testbench and PHPUnit 
 supported combinations are covered by the CI matrix in
 [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
-> **Warning**
-> On PHP 8.1 the command above **cannot resolve**: the only framework release compatible with 8.1 is
-> Laravel 10, and Composer refuses to load it because that branch is past its security window. Either
-> develop on PHP 8.2+, or use the advisory escape hatch from
-> [Reproducing a CI leg locally](#reproducing-a-ci-leg-locally) below (which is exactly the PHP 8.1 /
-> Laravel 10 CI leg) and revert `composer.json` afterwards.
+> **Note**
+> `--prefer-lowest` (the `lowest` CI leg) additionally needs the advisory escape hatch from
+> [Reproducing a CI leg locally](#reproducing-a-ci-leg-locally) below, because Composer refuses to load
+> the Laravel 10 releases it resolves.
 
 Individual commands:
 
@@ -101,8 +94,6 @@ Individual commands:
 | `composer format` | Laravel Pint (`composer format:check` for a dry run) |
 
 ### Reproducing a CI leg locally
-
-This is also the only way to work on PHP 8.1 (see the warning above).
 
 ```bash
 # Composer >= 2.10 blocks every Laravel 10 and 11 release because those branches are past their
@@ -134,13 +125,12 @@ its floor stays in `composer.json`, which is why CI never pins `orchestra/testbe
   differ between Laravel 10 and 11+.
 - **No `ext-*` requirements and no `config.platform` entries in `composer.json`.** The instrumentation
   needs neither, and platform overrides would break the PHP matrix.
-- **A `require-dev` floor has to install *and* run on PHP 8.1.** `--prefer-lowest` resolves the dev
-  tools as well, so a floor whose lowest matching release needs a newer PHP makes the `lowest` leg
-  unresolvable, and a floor whose lowest matching release is broken makes `composer check`
-  unreproducible there. `laravel/pint` is the live example, wedged between the two: `1.18.0` cannot run
-  at all (`Call to undefined method PhpCsFixer\Config::setParallelConfig()`, fixed in `1.18.1`), while
-  from `1.21.0` on Pint itself requires PHP `^8.2` — hence the `^1.18.1` floor, which is what
-  `--prefer-lowest` picks up.
+- **A `require-dev` floor has to install *and* run on the lowest supported PHP.** `--prefer-lowest`
+  resolves the dev tools as well, so a floor whose lowest matching release needs a newer PHP makes the
+  `lowest` leg unresolvable, and a floor whose lowest matching release is broken makes `composer check`
+  unreproducible there. `laravel/pint` is the live example of the second case: `1.18.0` cannot run at
+  all (`Call to undefined method PhpCsFixer\Config::setParallelConfig()`, fixed in `1.18.1`), hence the
+  `^1.18.1` floor.
 - **Do not add a PHPStan baseline.** The package is small; fix the code instead.
 - **Every config read needs an inline default, and that default must equal the shipped value.**
   `mergeConfigFrom()` is a shallow merge of top-level keys

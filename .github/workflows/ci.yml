@@ -26,18 +26,18 @@ jobs:
       fail-fast: false
       matrix:
         # Explicit pairs, not a cross product: Laravel 13 requires PHP >= 8.3, so there is no
-        # 8.1/8.2 leg for it. Only laravel/framework is pinned here - Testbench majors map 1:1
+        # 8.2 leg for it. Only laravel/framework is pinned here - Testbench majors map 1:1
         # onto Laravel majors (8 -> 10, 9 -> 11, 10 -> 12, 11 -> 13), so pinning the framework
         # picks the Testbench major, while its *floor* stays under composer.json's control.
         #
-        # composer.json declares `php: ^8.1` with no upper bound, so 8.5 is allowed and has to be
+        # composer.json declares `php: ^8.2` with no upper bound, so 8.5 is allowed and has to be
         # covered: our own applications are already on `php ^8.4.1`. That leg is Laravel 13 only, on
         # purpose. Nobody runs the newest PHP on a framework branch that is already past its security
         # window (see the advisory escape hatch below), and Laravel 10 on PHP 8.5 emits 18
         # deprecations from its own vendor tree - noise this package cannot fix, in a combination no
         # consumer has.
         include:
-          - { php: '8.1', laravel: '10.*', deps: lowest }
+          - { php: '8.2', laravel: '10.*', deps: lowest }
           - { php: '8.2', laravel: '10.*', deps: highest }
           - { php: '8.2', laravel: '11.*', deps: highest }
           - { php: '8.3', laravel: '11.*', deps: highest }

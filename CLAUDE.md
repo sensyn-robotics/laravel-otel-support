@@ -33,9 +33,8 @@ grep -rnE 'OpenTelemetry\\(SDK|SemConv|Contrib)' src config
 composer validate --strict --no-check-lock
 ```
 
-Development requires PHP 8.2+, even though the package supports 8.1: on 8.1 a plain `composer install`
-cannot resolve. See [CONTRIBUTING.md](CONTRIBUTING.md#local-setup) for the escape hatch and for
-reproducing a specific CI leg.
+PHP 8.2+ (the package's own floor). Reproducing the `lowest` CI leg needs an advisory escape hatch —
+see [CONTRIBUTING.md](CONTRIBUTING.md#local-setup).
 
 On a machine with no PHP, run the same commands in a container — `vendor/` is portable because these
 are PHP scripts:
@@ -66,11 +65,11 @@ Each of these passes PHPStan and the whole test suite while being broken for a c
   stays green — but consumer dashboards, recording rules and alerts break. This is a minor bump, never
   a patch, and it includes following an upstream semconv rename.
 - **An API that exists in Laravel 12 but not 10.** The package supports 10 through 13 from a single
-  branch, and only two of the nine CI legs run Laravel 10 (`8.1` lowest and `8.2` highest). Queue event
-  payloads in particular differ between 10 and 11+.
-- **A `require-dev` floor that cannot install or run on PHP 8.1.** `--prefer-lowest` resolves the dev
-  tools too, so a floor whose lowest matching release needs a newer PHP makes the `lowest` leg
-  unresolvable. `laravel/pint` is pinned between two such walls; `.github/dependabot.yml` documents why.
+  branch, and only two of the nine CI legs run Laravel 10 (both on PHP 8.2, `lowest` and `highest`).
+  Queue event payloads in particular differ between 10 and 11+.
+- **A `require-dev` floor that cannot install or run on the lowest supported PHP.** `--prefer-lowest`
+  resolves the dev tools too, so a floor whose lowest matching release is broken makes `composer check`
+  unreproducible on that leg. `laravel/pint` has a `^1.18.1` floor for exactly this reason.
 
 ## Fixed decisions — do not re-propose these
 
@@ -111,7 +110,7 @@ runs against the old one.
 |---|---|
 | a metric, attribute key or attribute value | `src/Metrics/README.md`, including the semconv version it declares |
 | a config option | the inline default at the call site **and** the config table in `README.md` |
-| a `Buckets` member used by `config/otel-support.php` | treat as breaking — consumers keep a published copy of that file |
+| the shipped `config/otel-support.php` | keep it free of package class references — consumers keep a published copy, and a missing class there is a boot-time fatal `config:clear` cannot fix |
 | anything in `src/` | a matching test |
 | an action pin in `.github/workflows/` | the trailing `# vX.Y.Z` comment — Dependabot reads it |
 

@@ -8,11 +8,11 @@ use Illuminate\Support\Facades\Log;
 /**
  * histogram のバケット境界のパース / 正規化。
  *
- * **同梱 config はこのクラスを参照しない。** config/otel-support.php が `Buckets::parse(env(...), ...)`
- * を書いていた頃は、publish した消費側リポジトリにその式がコピーとして残り、パッケージを外すか
+ * **同梱 config はこのクラスを参照しない。** 同梱 config がこのクラスの静的メソッドを呼ぶ書き方を
+ * していた頃は、publish した消費側リポジトリにその式がコピーとして残り、パッケージを外すか
  * クラスを rename した時点で config ロード時 (= framework boot 前、例外ハンドラより前) の fatal に
  * なっていた。artisan 自身も同じ bootstrap を通るため `config:clear` でも復旧できない。
- * 今の同梱 config は env の生値だけを持ち、パース/正規化は実行時の読み口である fromConfig() が行う。
+ * 今の同梱 config は env の生値だけを持ち、パース/正規化は実行時の唯一の読み口 fromConfig() が行う。
  *
  * このクラス全体が @internal で、消費側のファイルから直接呼ばれることは無い。
  */
@@ -44,22 +44,8 @@ class Buckets
     public const DEFAULT_QUEUE = self::SEMCONV_DURATION;
 
     /**
-     * カンマ区切り文字列 ("0.05,0.1,0.25,...") を正規化済みの histogram バケット配列にパースする。
-     * 非数値・空は $default を返す。順不同・重複は normalize() で整える。
-     *
-     * @param  list<int|float>  $default
-     * @return list<int|float>
-     *
-     * @internal fromConfig() が env 由来の文字列を読むための入口。
-     */
-    public static function parse(mixed $csv, array $default): array
-    {
-        // env 未指定 (null 等) も不正値も $default。異常かどうかの区別は fromConfig() 側で行う。
-        return (is_string($csv) ? self::parseCsv($csv) : null) ?? $default;
-    }
-
-    /**
-     * カンマ区切り文字列を正規化済みの境界配列にする。パースできなければ null (= 呼び出し側が既定へ)。
+     * カンマ区切り文字列 ("0.05,0.1,0.25,...") を正規化済みの境界配列にする。
+     * パースできなければ null (= 呼び出し側が既定へ倒す)。順不同・重複は normalize() が整える。
      *
      * @return list<int|float>|null
      */
@@ -131,7 +117,7 @@ class Buckets
      * @param  array<array-key, mixed>  $boundaries
      * @return list<int|float>|null
      *
-     * @internal parse() / fromConfig() の共通処理。
+     * @internal parseCsv() / fromConfig() の共通処理。
      */
     public static function normalize(array $boundaries): ?array
     {

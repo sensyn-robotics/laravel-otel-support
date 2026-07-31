@@ -37,10 +37,7 @@ takes care of merging and publishing the config in one place (`metrics.*` in
   - `messaging.client.sent.messages` carries the attribute set semconv specifies for that metric:
     `messaging.operation.name` (`send`) and `messaging.system` (both Required), plus
     `messaging.destination.name` (Conditionally Required) and the package's own
-    `laravel.queue.job.name`. `messaging.operation.type` is deliberately **not** emitted: it is not
-    part of this metric's attribute table (it belongs to the spans and to
-    `messaging.client.operation.duration`), and adding it would make the series diverge from the
-    same metric emitted by other languages' instrumentation.
+    `laravel.queue.job.name`.
     - `messaging.system` is the Laravel queue driver mapped onto semconv's well-known values, which
       today means `sqs` → `aws_sqs`. Drivers with no well-known value (`redis`, `database`,
       `beanstalkd`, …) are passed through as the custom value semconv permits. `sync` never appears,
