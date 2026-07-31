@@ -1,0 +1,10 @@
+# Code owners for this repository.
+#
+# The branch ruleset on the default branch has `require_code_owner_review` enabled, so every pull
+# request needs an approval from a member of the team below. GitHub reads this file from the *base*
+# branch of a pull request, which means a change to it only takes effect once it has been merged.
+#
+# The team must keep at least write access to this repository, otherwise GitHub silently ignores the
+# entry and the requirement is satisfied by any approval.
+
+* @sensyn-robotics/infra
