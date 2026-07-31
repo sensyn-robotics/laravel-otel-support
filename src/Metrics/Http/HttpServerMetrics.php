@@ -41,6 +41,16 @@ class HttpServerMetrics
     /** 未知メソッドの正規化先 (semconv 規定値)。 */
     private const OTHER_METHOD = '_OTHER';
 
+    /**
+     * network.protocol.version として認める値。HTTP のバージョン番号は事実上この閉じた集合で、
+     * semconv の例示値もこれに揃っている。メソッドと違って未知値の受け皿 (_OTHER) は規定が無いため、
+     * 外れた場合は属性を付けない (semconv: "If the actual protocol version is not known, this
+     * attribute SHOULD NOT be set")。
+     *
+     * @var list<string>
+     */
+    private const KNOWN_PROTOCOL_VERSIONS = ['0.9', '1.0', '1.1', '2', '2.0', '3', '3.0'];
+
     private HistogramInterface $duration;
 
     public function __construct(MeterProviderInterface $meterProvider)
@@ -142,9 +152,19 @@ class HttpServerMetrics
         }
 
         // network.protocol.version (Recommended, best-effort)。"HTTP/1.1" -> "1.1"。
+        //
+        // SERVER_PROTOCOL は web サーバがリクエストラインの HTTP-version をそのまま渡す値で
+        // (nginx の fastcgi_param SERVER_PROTOCOL $server_protocol)、前段が正規化しない構成では
+        // "HTTP/1.00" のような表記揺れがそのまま属性値になる。それは http.request.method 側が
+        // requestMethod() で既知値 + _OTHER に閉じて防いでいるのと同じ攻撃面 (下のコメント参照) なので、
+        // ここも既知値でしか属性を付けない。semconv も "If the actual protocol version is not known,
+        // this attribute SHOULD NOT be set" と規定しているので、外れ値は _OTHER に倒さず属性ごと落とす。
         $protocol = $request->server->get('SERVER_PROTOCOL');
         if (is_string($protocol) && str_starts_with($protocol, 'HTTP/')) {
-            $attrs['network.protocol.version'] = substr($protocol, 5);
+            $version = substr($protocol, 5);
+            if (in_array($version, self::KNOWN_PROTOCOL_VERSIONS, true)) {
+                $attrs['network.protocol.version'] = $version;
+            }
         }
 
         // error.type はサーバエラー (5xx) の時のみ。値はステータスコード文字列でよい。

@@ -65,7 +65,14 @@ takes care of merging and publishing the config in one place (`metrics.*` in
       instance `getScheme()` raising `ConflictingHeadersException` when a trusted `Forwarded` header
       contradicts `X-Forwarded-Proto`. The instrumentation never lets its own failure escape into the
       application's `terminate` chain, and it does not invent an attribute value either.
-  - Every queue metric carries the job class as `laravel.queue.job.name`.
+  - Every queue metric carries the job's **display name** as `laravel.queue.job.name`, which is the
+    job class for an ordinary job. It is not simply `get_class()`, because the framework queues
+    mail, notifications, queued listeners and broadcast events wrapped in `SendQueuedMailable`,
+    `SendQueuedNotifications`, `CallQueuedListener` and `BroadcastEvent`; each of those overrides
+    `displayName()` to return the class it wraps, and that is what ends up in the payload. The
+    producer side reproduces the framework's rule so that both sides of a message agree — otherwise
+    `sum(sent) - sum(finished)` splits into a wrapper name that never finishes and an inner name that
+    was never sent.
   - Every queue metric carries the queue as `messaging.destination.name`, and on the `sqs` driver
     both sides are normalised to the queue *name* so that they join:
     - The consumer side would otherwise report the **full queue URL**, because that is what Laravel

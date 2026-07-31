@@ -64,21 +64,47 @@ class PublishesConfigTest extends TestCase
         $this->assertFileExists($this->publishedPath);
     }
 
-    public function test_published_config_points_at_the_package_namespace(): void
+    /**
+     * publish 済み config はパッケージのクラスを **一切参照してはいけない**。
+     *
+     * publish するとこのファイルは消費側リポジトリのコピーになり、以後パッケージ側の修正は遡って
+     * 届かない。パッケージのクラスを参照していると、パッケージを composer から外した時点で
+     * LoadConfiguration がこのファイルを require したところで「クラスが無い」の fatal になる。
+     * それは HandleExceptions より前なので例外ハンドラが無く、`php artisan config:clear` 自身も
+     * 同じ bootstrap を通るため artisan での復旧もできない。
+     *
+     * このアサートは名前空間文字列で見る。`Buckets::class` のような定数参照で書くと、クラスを
+     * rename したときにアサート側も一緒に動いて検査が素通りする。
+     */
+    public function test_published_config_does_not_reference_the_package(): void
     {
         $this->publish();
 
         $contents = (string) file_get_contents($this->publishedPath);
-        $this->assertStringContainsString(Buckets::class, $contents);
 
-        // publish 後の config が実際にロードできること。旧名前空間 (移設元アプリの App\... 等) を
-        // 指していれば、この require が Error で落ちる。
+        $this->assertStringNotContainsString('Sensyn\\LaravelOTelSupport', $contents);
+        $this->assertStringNotContainsString('use ', $contents);
+    }
+
+    public function test_published_config_loads_without_the_package_autoloaded(): void
+    {
+        $this->publish();
+
+        // publish 後の config が実際にロードできること。
         /** @var array<string, mixed> $published */
         $published = require $this->publishedPath;
 
-        $this->assertSame(Buckets::DEFAULT_HTTP, Arr::get($published, 'metrics.http.buckets'));
-        $this->assertSame(Buckets::DEFAULT_QUEUE, Arr::get($published, 'metrics.queue.duration_buckets'));
+        // env 未設定なので生値は null。既定への解決は実行時の Buckets::fromConfig() が行う。
+        $this->assertNull(Arr::get($published, 'metrics.http.buckets'));
+        $this->assertNull(Arr::get($published, 'metrics.queue.duration_buckets'));
         $this->assertTrue(Arr::get($published, 'metrics.enabled'));
         $this->assertTrue(Arr::get($published, 'worker_flusher.enabled'));
+
+        // 実行時の読み口が、その null を既定のバケットに解決すること (config 側から定数参照を
+        // 外したことで穴が開いていないかの確認)。
+        $this->assertSame(
+            Buckets::DEFAULT_HTTP,
+            Buckets::fromConfig('otel-support.metrics.http.buckets', Buckets::DEFAULT_HTTP),
+        );
     }
 }

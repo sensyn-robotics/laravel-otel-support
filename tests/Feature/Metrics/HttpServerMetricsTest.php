@@ -9,10 +9,14 @@ use OpenTelemetry\API\Metrics\HistogramInterface;
 use OpenTelemetry\API\Metrics\MeterInterface;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
 use OpenTelemetry\API\Metrics\Noop\NoopHistogram;
+use OpenTelemetry\Context\Context;
+use OpenTelemetry\Context\ContextInterface;
+use PHPUnit\Framework\Attributes\DataProvider;
 use ReflectionProperty;
 use RuntimeException;
 use Sensyn\LaravelOTelSupport\Metrics\Buckets;
 use Sensyn\LaravelOTelSupport\Metrics\Http\HttpServerMetrics;
+use Sensyn\LaravelOTelSupport\Tests\Support\CapturingHistogram;
 use Sensyn\LaravelOTelSupport\Tests\Support\RecordsMetrics;
 use Sensyn\LaravelOTelSupport\Tests\TestCase;
 use Symfony\Component\HttpFoundation\Exception\BadRequestException;
@@ -379,6 +383,178 @@ class HttpServerMetricsTest extends TestCase
         config(['otel-support.metrics.http.buckets' => ['oops']]);
 
         $this->assertInstanceOf(HttpServerMetrics::class, new HttpServerMetrics($this->meterProvider));
+
+        // 「throw しない」だけでは instrument が丸ごと Noop に落ちる退行と区別できないので、
+        // 既定の境界で動き続けていることまで見る。
+        $this->runMiddleware(Request::create('https://example.test/things', 'GET'), new Response('', 200));
+        $this->assertSame(
+            Buckets::DEFAULT_HTTP,
+            $this->histogramBounds($this->collectMetrics()['http.server.request.duration']),
+        );
+    }
+
+    /**
+     * 属性集合を **丸ごと** 固定する。
+     *
+     * 個別キーの assertSame だけでは「属性の追加」が一切落ちない。ここに url.path や user id のような
+     * 高カーディナリティ属性を足す変更が入ると、bucket 14 本の explicit histogram では系列が一気に増え、
+     * このクラス自身が requestMethod() のコメントで警告している「未認証リモートからメトリクスストアを
+     * 膨らませる」経路が成立する。完全一致にしておけば追加も削除も必ず落ちる。
+     */
+    public function test_attribute_set_is_pinned_for_a_matched_route(): void
+    {
+        $request = Request::create('https://example.test/api/v1/users/5', 'GET');
+        $request->setRouteResolver(fn () => new Route('GET', 'api/v1/users/{user}', []));
+
+        $this->runMiddleware($request, new Response('', 200));
+
+        $this->assertSame([
+            'http.request.method' => 'GET',
+            'url.scheme' => 'https',
+            'http.response.status_code' => 200,
+            'http.route' => '/api/v1/users/{user}',
+            'network.protocol.version' => '1.1',
+        ], $this->attributesOf($this->collectMetrics()['http.server.request.duration']));
+    }
+
+    public function test_attribute_set_is_pinned_for_an_unmatched_route(): void
+    {
+        // ルート未マッチ (404) では http.route が無く、4xx なので error.type も付かない。
+        $this->runMiddleware(Request::create('http://example.test/no/such/path', 'GET'), new Response('', 404));
+
+        $this->assertSame([
+            'http.request.method' => 'GET',
+            'url.scheme' => 'http',
+            'http.response.status_code' => 404,
+            'network.protocol.version' => '1.1',
+        ], $this->attributesOf($this->collectMetrics()['http.server.request.duration']));
+    }
+
+    /**
+     * error.type の境界。499/500 を取り違えると、error.type の有無で success/error を割っている
+     * ダッシュボードとアラートが 4xx をまとめてサーバエラーとして扱う。
+     */
+    #[DataProvider('errorTypeBoundaries')]
+    public function test_error_type_is_attached_only_to_server_errors(int $status, ?string $expected): void
+    {
+        $this->runMiddleware(Request::create('https://example.test/things', 'GET'), new Response('', $status));
+
+        $attrs = $this->attributesOf($this->collectMetrics()['http.server.request.duration']);
+
+        if ($expected === null) {
+            $this->assertArrayNotHasKey('error.type', $attrs);
+        } else {
+            $this->assertSame($expected, $attrs['error.type']);
+        }
+    }
+
+    /**
+     * @return iterable<string, array{int, string|null}>
+     */
+    public static function errorTypeBoundaries(): iterable
+    {
+        yield '400 は付かない' => [400, null];
+        yield '499 は付かない' => [499, null];
+        yield '500 ちょうどで付く' => [500, '500'];
+        yield '503 も付く' => [503, '503'];
+    }
+
+    /**
+     * SERVER_PROTOCOL は web サーバがリクエストラインから素通しする値で、前段が正規化しない構成では
+     * 表記揺れがそのまま届く。既知値でなければ属性を付けない (semconv の SHOULD NOT に従う)。
+     */
+    #[DataProvider('protocolVersions')]
+    public function test_network_protocol_version_is_allowlisted(string $serverProtocol, ?string $expected): void
+    {
+        $request = Request::create('https://example.test/things', 'GET');
+        $request->server->set('SERVER_PROTOCOL', $serverProtocol);
+
+        $this->runMiddleware($request, new Response('', 200));
+
+        $attrs = $this->attributesOf($this->collectMetrics()['http.server.request.duration']);
+
+        if ($expected === null) {
+            $this->assertArrayNotHasKey('network.protocol.version', $attrs);
+        } else {
+            $this->assertSame($expected, $attrs['network.protocol.version']);
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string, string|null}>
+     */
+    public static function protocolVersions(): iterable
+    {
+        yield 'HTTP/1.1' => ['HTTP/1.1', '1.1'];
+        yield 'HTTP/1.0' => ['HTTP/1.0', '1.0'];
+        yield 'HTTP/2' => ['HTTP/2', '2'];
+        yield 'HTTP/3' => ['HTTP/3', '3'];
+        // 表記揺れ・詰め物・非 HTTP スキーム。属性ごと落ちること。
+        yield '桁を詰めた表記揺れ' => ['HTTP/1.000', null];
+        yield '長い任意文字列' => ['HTTP/'.str_repeat('9', 64), null];
+        yield 'HTTP/ 以外' => ['ICY 200 OK', null];
+        yield '空のバージョン' => ['HTTP/', null];
+    }
+
+    /**
+     * handle() を経ずに terminate() だけが走る経路 (Kernel::handle() が bootstrap 例外を握り潰して
+     * pipeline を実行しなかった場合。Kernel::terminate() は global middleware の terminate を常に呼ぶ)。
+     *
+     * ガードが消えると `microtime(true) - null` ≒ 1.7e9 秒が cumulative histogram の sum に入り、
+     * そのプロセスが生きている間ずっと平均・分位のダッシュボードが壊れる。エラーは出ない。
+     */
+    public function test_terminate_without_handle_records_nothing(): void
+    {
+        $request = Request::create('https://example.test/things', 'GET');
+        $middleware = new HttpServerMetrics($this->meterProvider);
+
+        $middleware->terminate($request, new Response('', 200));
+
+        $metrics = $this->collectMetrics();
+        $points = array_key_exists('http.server.request.duration', $metrics)
+            ? $this->dataPoints($metrics['http.server.request.duration'])
+            : [];
+        $this->assertSame([], $points, 'handle() を経ていない terminate() は data point を作ってはいけない。');
+    }
+
+    /**
+     * handle() 時点の Context が terminate() の record() まで運ばれること。
+     *
+     * これは exemplar (レイテンシ外れ値から trace への導線) の前提だが、context は集計値にも属性にも
+     * 現れないため、渡し忘れても SDK 経由のテストは全て緑になる。record() の第3引数を直接見る。
+     */
+    public function test_span_context_captured_in_handle_reaches_record(): void
+    {
+        $histogram = new CapturingHistogram;
+
+        $meter = Mockery::mock(MeterInterface::class);
+        $meter->shouldReceive('createHistogram')->andReturn($histogram);
+        $meterProvider = Mockery::mock(MeterProviderInterface::class);
+        $meterProvider->shouldReceive('getMeter')->andReturn($meter);
+
+        $middleware = new HttpServerMetrics($meterProvider);
+        $request = Request::create('https://example.test/things', 'GET');
+        $response = new Response('', 200);
+
+        // handle() の間だけ有効な context に目印を入れる。terminate() 時点では既に detach 済みなので、
+        // 「その場で Context::getCurrent() を読む」実装ではこの目印は取れない = handle() で捕まえた
+        // context が運ばれていることの証明になる。
+        $key = Context::createKey('laravel-otel-support.test');
+        $scope = Context::getCurrent()->with($key, 'marker')->activate();
+        try {
+            $middleware->handle($request, fn () => $response);
+        } finally {
+            $scope->detach();
+        }
+
+        $this->assertNull(Context::getCurrent()->get($key), 'detach 後に目印が残っていては前提が崩れる。');
+
+        $middleware->terminate($request, $response);
+
+        $this->assertCount(1, $histogram->records);
+        $context = $histogram->records[0]['context'];
+        $this->assertInstanceOf(ContextInterface::class, $context);
+        $this->assertSame('marker', $context->get($key), 'handle() 時点の context が record() に渡っていない (exemplar が無言で死ぬ)。');
     }
 
     public function test_meter_resolution_failure_does_not_propagate_from_the_constructor(): void

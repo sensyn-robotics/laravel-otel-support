@@ -182,15 +182,38 @@ believe the visibility should change, raise it with the owning team first rather
 
 Consuming applications reference this repository directly as a Composer **VCS repository**, so there is
 no registry to publish to: releasing *is* pushing a Git tag. Composer lists the tags of this repository
-and reads `composer.json` as it existed at the tag. Use semantic versioning and tag from `main` after CI
-is green:
+and reads `composer.json` as it existed at the tag.
+
+**Tag `origin/main` explicitly — never your local `HEAD`.** A pull request is squashed on merge, so the
+commit you have checked out is not the commit that landed. Tagging `HEAD` from a feature branch puts the
+release on a commit that is not reachable from `main`.
 
 ```bash
-git tag v1.2.3
+git fetch origin
+git tag -a v1.2.3 origin/main -m "v1.2.3"
+
+# The tag must be on the commit that is actually the tip of main.
+git rev-parse v1.2.3^{commit}
+gh api repos/sensyn-robotics/laravel-otel-support/commits/main --jq .sha
+
 git push origin v1.2.3
 ```
 
-Two consequences worth remembering:
+Check that CI is green on `main` before tagging: the tag itself does not run CI (`ci.yml` triggers on
+branches, not tags).
+
+#### If you tag the wrong commit
+
+The `release tags` ruleset restricts creation, deletion and force-updates of every tag, with repository
+admins on the bypass list. So an admin can delete and re-push a tag, and anyone else cannot.
+
+Deleting is only the right move if **nobody has resolved the tag yet**. Composer caches a dist archive
+per version and ref, and a consumer that already ran `composer update` has the old contents pinned in
+its lock file. Moving a tag under them changes what the version means without changing what they
+install — the two silently diverge. Once a release may have been consumed, **do not reuse the number**:
+release the fix as the next patch version instead.
+
+Two more consequences worth remembering:
 
 - **Only tags are releasable.** A commit on `main` without a tag is reachable solely as `dev-main`, which
   is not something a consumer should depend on.

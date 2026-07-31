@@ -195,6 +195,25 @@ class WorkerFlusherTest extends TestCase
     }
 
     /**
+     * Octane のイベント名を **リテラルで** 固定する。
+     *
+     * このイベントはクラス名の文字列で購読している (laravel/octane を依存に持たないため)。他のテストは
+     * すべて定数 OCTANE_REQUEST_TERMINATED 経由で listen と dispatch を行うので、リテラルが何であっても
+     * 両者が一致してしまい、値そのものが間違っていることを検知できない。
+     *
+     * リテラルが実クラス名とズレると、Octane worker では誰も RequestTerminated を購読していない状態に
+     * なり、per-request の forceFlush が完全に止まる。例外もログも出ないので、症状は「Octane の
+     * サービスだけ span/metric が worker recycle まで遅れる」という判別困難な形でしか出ない。
+     */
+    public function test_octane_event_name_matches_the_upstream_class(): void
+    {
+        $this->assertSame(
+            'Laravel\Octane\Events\RequestTerminated',
+            WorkerFlusher::OCTANE_REQUEST_TERMINATED,
+        );
+    }
+
+    /**
      * 引数を object で受けるのは静的解析のため: 具象の Noop クラスを直接渡すと PHPStan が
      * 「常に false」と判定して落ちる (= 前提が静的にも成り立っていることの裏返し)。
      */

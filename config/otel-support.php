@@ -1,6 +1,13 @@
 <?php
 
-use Sensyn\LaravelOTelSupport\Metrics\Buckets;
+/*
+| このファイルは publish されると消費側リポジトリにコピーとして残り、以後パッケージ側の変更は
+| 遡って届かない。したがってパッケージのクラスを参照してはいけない: 参照すると、パッケージを
+| composer から外した時点で config ロード (LoadConfiguration) が「クラスが無い」で fatal になり、
+| これは HandleExceptions より前なので例外ハンドラも無く、`php artisan config:clear` 自身も同じ
+| bootstrap を通るため復旧できない。値の解釈は実行時の読み口 (Buckets::fromConfig) に任せ、
+| ここは env の生値だけを置く。
+*/
 
 return [
     'metrics' => [
@@ -20,20 +27,20 @@ return [
             // http のメトリクス計装を有効にする。
             'enabled' => true,
 
-            // explicit-bucket (秒)。既定は semconv 推奨値 (Buckets::DEFAULT_HTTP)。
+            // explicit-bucket (秒)。null なら semconv 推奨値。
             // プロダクトの実分布・SLO に合わせて env OTEL_METRICS_HTTP_BUCKETS (カンマ区切り) で上書き可。
-            // env が空・非数値なら Buckets::parse() が既定にフォールバックする。
-            'buckets' => Buckets::parse(env('OTEL_METRICS_HTTP_BUCKETS'), Buckets::DEFAULT_HTTP),
+            // ここに数値の配列を直接書いてもよい。空・非数値なら警告を出して既定にフォールバックする。
+            'buckets' => env('OTEL_METRICS_HTTP_BUCKETS'),
         ],
 
         'queue' => [
             // queue worker のメトリクス計装を有効にする。
             'enabled' => true,
 
-            // job duration の explicit-bucket (秒)。既定は semconv (messaging) 推奨値 (Buckets::DEFAULT_QUEUE)。
+            // job duration の explicit-bucket (秒)。null なら semconv (messaging) 推奨値。
             // job が秒〜分かかるなら env OTEL_METRICS_QUEUE_DURATION_BUCKETS (カンマ区切り) で上書きする。
-            // env が空・非数値なら Buckets::parse() が既定にフォールバックする。
-            'duration_buckets' => Buckets::parse(env('OTEL_METRICS_QUEUE_DURATION_BUCKETS'), Buckets::DEFAULT_QUEUE),
+            // ここに数値の配列を直接書いてもよい。空・非数値なら警告を出して既定にフォールバックする。
+            'duration_buckets' => env('OTEL_METRICS_QUEUE_DURATION_BUCKETS'),
         ],
     ],
 

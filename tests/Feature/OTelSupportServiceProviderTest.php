@@ -3,6 +3,7 @@
 namespace Sensyn\LaravelOTelSupport\Tests\Feature;
 
 use Illuminate\Support\Arr;
+use Sensyn\LaravelOTelSupport\Metrics\Buckets;
 use Sensyn\LaravelOTelSupport\Metrics\Http\HttpServerMetrics;
 use Sensyn\LaravelOTelSupport\Metrics\Queue\QueueMetrics;
 use Sensyn\LaravelOTelSupport\OTelSupportServiceProvider;
@@ -28,14 +29,35 @@ class OTelSupportServiceProviderTest extends TestCase
         $this->assertTrue(config('otel-support.metrics.http.enabled'));
         $this->assertTrue(config('otel-support.metrics.queue.enabled'));
         $this->assertTrue(config('otel-support.worker_flusher.enabled'));
-        $this->assertNotEmpty(config('otel-support.metrics.http.buckets'));
-        $this->assertNotEmpty(config('otel-support.metrics.queue.duration_buckets'));
+
+        // バケットは env の生値なので未設定なら null。既定への解決は同梱 config ではなく実行時の
+        // 読み口が担う (同梱 config からパッケージのクラス参照を外したため。理由は config の冒頭)。
+        $this->assertNull(config('otel-support.metrics.http.buckets'));
+        $this->assertNull(config('otel-support.metrics.queue.duration_buckets'));
+        $this->assertSame(
+            Buckets::DEFAULT_HTTP,
+            Buckets::fromConfig('otel-support.metrics.http.buckets', Buckets::DEFAULT_HTTP),
+        );
+        $this->assertSame(
+            Buckets::DEFAULT_QUEUE,
+            Buckets::fromConfig('otel-support.metrics.queue.duration_buckets', Buckets::DEFAULT_QUEUE),
+        );
     }
 
     public function test_http_middleware_is_prepended_to_the_global_stack(): void
     {
         // 消費側は Kernel.php / bootstrap/app.php を触らない。provider の boot() が prepend する。
         $this->assertTrue($this->hasGlobalMiddleware(HttpServerMetrics::class));
+
+        // stack に居るだけでは足りない。**先頭** であることが計測区間と欠測の有無を決める
+        // (理由は globalMiddlewareStack() の docblock)。prepend が push に退行するとここで落ちる。
+        $stack = $this->globalMiddlewareStack();
+        $this->assertNotSame([], $stack, '検査対象の stack が空では、先頭であることの検査が意味を持たない。');
+        $this->assertSame(
+            HttpServerMetrics::class,
+            $stack[0],
+            'HTTP 計装は global middleware の先頭でなければならない (末尾だと短絡応答するリクエストが丸ごと欠測する)。',
+        );
     }
 
     public function test_middleware_is_resolved_as_a_singleton(): void

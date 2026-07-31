@@ -479,12 +479,32 @@ class QueueMetrics
         return is_string($queue) && $queue !== '' ? $queue : 'default';
     }
 
+    /**
+     * producer 側の job 名。**consumer 側 (recordTerminal の resolveName) と同じ値になること**が要件で、
+     * ここが割れると sum(sent) - sum(finished) を job 名で slice したときにバックログが 2 本に分裂する。
+     *
+     * producer には payload がまだ無いので resolveName は使えない。代わりに、framework が payload の
+     * displayName を作るときと同じ規則をここで再現する:
+     *
+     *   - オブジェクト: Queue::getDisplayName() = `method_exists($job,'displayName') ? $job->displayName() : get_class($job)`
+     *   - 文字列:       Queue::createStringPayload() = `explode('@', $job)[0]`
+     *
+     * 単純なクラス名では駄目な理由は、framework 自身が displayName() を override する wrapper を
+     * 挟むためで、Mail (SendQueuedMailable)・Notification (SendQueuedNotifications)・queued listener
+     * (CallQueuedListener)・broadcast (BroadcastEvent) の 4 系統が該当する。`Mail::to()->queue()` では
+     * producer が見るのは wrapper の SendQueuedMailable、consumer が見るのは中身の Mailable になる。
+     * この分岐は Laravel 10〜13 で同一なのでバージョン差の心配は無い ($e->payload を読む案もあるが、
+     * イベントのプロパティ構成に依存するぶん producerQueue() と同じ get_object_vars 分岐が要る)。
+     */
     private function producerJobName(JobQueued $e): string
     {
-        // producer は payload 前なので resolveName が使えない。dispatch されたオブジェクトのクラス名で代替
-        // (string dispatch の場合はその名前)。
         $job = $e->job;
 
-        return is_object($job) ? $job::class : (string) $job;
+        if (is_object($job)) {
+            return method_exists($job, 'displayName') ? (string) $job->displayName() : $job::class;
+        }
+
+        // 'SendEmail@handle' のような Class@method 指定は、payload では method 部が落ちる。
+        return explode('@', (string) $job)[0];
     }
 }

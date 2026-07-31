@@ -146,10 +146,15 @@ exception reach the application.
 - **Flushing** — `WorkerFlusher` keeps the worker process alive, and the dirty flag survives the
   failure, so the flush is retried on the next `Looping`.
 
-None of this is logged. The logger is a failure source of its own, and these paths run per request and
-per job, so a log line would amplify the problem instead of reporting it. **A failure therefore shows up
-as missing telemetry, never as changed application behaviour**; when data goes missing, look for the
-cause in the OTel SDK's own diagnostics rather than the application log.
+None of the recording and flushing paths log. The logger is a failure source of its own, and those paths
+run per request and per job, so a log line would amplify the problem instead of reporting it. **A failure
+therefore shows up as missing telemetry, never as changed application behaviour**; when data goes
+missing, look for the cause in the OTel SDK's own diagnostics rather than the application log.
+
+There is exactly one exception, and it is a configuration error rather than a runtime failure: an
+invalid bucket list logs a single `warning` naming the config key, from where the instrument is built.
+The middleware is constructed twice per request, so leaving a bad value in place means a steady stream
+of that line — treat it as something to fix, not to filter.
 
 Wiring is fail-open too. The provider only *registers listeners* during `boot()`; `WorkerFlusher` itself
 is built the first time one of those events fires, and the global tracer and meter providers are

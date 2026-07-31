@@ -27,7 +27,7 @@ trait MakesQueueEvents
     private function jobQueued(
         string $connection,
         string $id,
-        object $job,
+        object|string $job,
         ?string $queue = null,
         string $payload = '{}',
     ): JobQueued {

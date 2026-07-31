@@ -21,6 +21,7 @@ use RuntimeException;
 use Sensyn\LaravelOTelSupport\Metrics\Buckets;
 use Sensyn\LaravelOTelSupport\Metrics\Queue\QueueMetrics;
 use Sensyn\LaravelOTelSupport\Tests\Support\FakeQueuedJob;
+use Sensyn\LaravelOTelSupport\Tests\Support\FakeWrappedQueuedJob;
 use Sensyn\LaravelOTelSupport\Tests\Support\MakesQueueEvents;
 use Sensyn\LaravelOTelSupport\Tests\Support\RecordsMetrics;
 use Sensyn\LaravelOTelSupport\Tests\TestCase;
@@ -41,12 +42,29 @@ class QueueMetricsTest extends TestCase
         $this->bootMeter();
     }
 
+    /** subscribedDispatcher() が組み立てた計装。$start のリーク検査だけが直接触る。 */
+    private QueueMetrics $subscribed;
+
     private function subscribedDispatcher(): Dispatcher
     {
         $dispatcher = new Dispatcher;
-        (new QueueMetrics($this->meterProvider))->subscribe($dispatcher);
+        $this->subscribed = new QueueMetrics($this->meterProvider);
+        $this->subscribed->subscribe($dispatcher);
 
         return $dispatcher;
+    }
+
+    /**
+     * 計装が保持している開始時刻マップの中身。
+     *
+     * 外から観測できる出力 (metrics) には現れないので、リークはここを直接見るしかない。
+     *
+     * @return array<string, float>
+     */
+    private function startMap(): array
+    {
+        /** @var array<string, float> */
+        return (new ReflectionProperty(QueueMetrics::class, 'start'))->getValue($this->subscribed);
     }
 
     private function consumerJob(
@@ -625,6 +643,159 @@ class QueueMetricsTest extends TestCase
         $dispatcher->dispatch(new JobProcessed(self::CONN, $job));
         $dispatcher->dispatch(new JobFailed(self::CONN, $job, new RuntimeException('boom')));
         $dispatcher->dispatch(new JobExceptionOccurred(self::CONN, $job, new RuntimeException('boom')));
+    }
+
+    /**
+     * producer と consumer が **同じ** job 名を出すこと。
+     *
+     * ここが割れると、job 名で slice した `sum(sent) - sum(finished)` が「送ったきり終わらない名前」と
+     * 「送られていないのに終わる名前」の 2 本に分裂し、バックログもリトライ率も job 単位では読めなくなる。
+     * framework は Mail / Notification / queued listener / broadcast の 4 系統で wrapper を挟み、その
+     * wrapper が displayName() で中身のクラス名を返すので、producer 側で単に get_class を見ると割れる。
+     */
+    public function test_producer_job_name_matches_the_consumer_for_a_wrapped_job(): void
+    {
+        $dispatcher = $this->subscribedDispatcher();
+
+        // producer: wrapper を push する (Mail::to()->queue() が SendQueuedMailable を push する形)。
+        $dispatcher->dispatch($this->jobQueued(self::CONN, 'id-1', new FakeWrappedQueuedJob, 'emails'));
+
+        // consumer: payload の displayName = wrapper の中身。resolveName() がそれを返す。
+        $job = $this->consumerJob(FakeQueuedJob::class, 'emails');
+        $dispatcher->dispatch(new JobProcessing(self::CONN, $job));
+        $dispatcher->dispatch(new JobProcessed(self::CONN, $job));
+
+        $metrics = $this->collectMetrics();
+        $sentName = $this->attributesOf($metrics['messaging.client.sent.messages'])['laravel.queue.job.name'];
+        $finishedName = $this->attributesOf($metrics['laravel.queue.job.finished'])['laravel.queue.job.name'];
+
+        $this->assertSame(FakeQueuedJob::class, $sentName, 'producer は wrapper ではなく displayName() の値を出す必要がある。');
+        $this->assertSame($sentName, $finishedName, 'producer と consumer の job 名が割れている (backlog が 2 本に分裂する)。');
+    }
+
+    public function test_producer_job_name_matches_the_consumer_for_a_string_dispatch(): void
+    {
+        // Queue::push('SendEmail@handle') 形式。payload の displayName は method 部を落とした 'SendEmail'
+        // になる (Queue::createStringPayload) ので、producer も同じ規則で切る必要がある。
+        $dispatcher = $this->subscribedDispatcher();
+
+        $dispatcher->dispatch($this->jobQueued(self::CONN, 'id-1', 'SendEmail@handle', 'emails'));
+
+        $attrs = $this->attributesOf($this->collectMetrics()['messaging.client.sent.messages']);
+        $this->assertSame('SendEmail', $attrs['laravel.queue.job.name']);
+    }
+
+    public function test_producer_job_name_is_the_class_when_there_is_no_display_name(): void
+    {
+        // wrapper でない素の job は get_class がそのまま payload の displayName になる (既存の挙動)。
+        $dispatcher = $this->subscribedDispatcher();
+
+        $dispatcher->dispatch($this->jobQueued(self::CONN, 'id-1', new FakeQueuedJob, 'emails'));
+
+        $attrs = $this->attributesOf($this->collectMetrics()['messaging.client.sent.messages']);
+        $this->assertSame(FakeQueuedJob::class, $attrs['laravel.queue.job.name']);
+    }
+
+    /**
+     * 終端側の属性集合を丸ごと固定する。producer 側 (test_enqueue_records_sent_counter) だけが
+     * 完全一致アサートを持っていて終端側が緩い、という非対称を消す。
+     *
+     * duration は classic histogram なので bucket 14 本 × 属性値で系列が増える。job id や attempts の
+     * ような無限カーディナリティの属性が終端側に足されると、job 1 件ごとに新しい系列が生まれる。
+     */
+    public function test_terminal_attribute_sets_are_pinned_on_success(): void
+    {
+        $dispatcher = $this->subscribedDispatcher();
+        $job = $this->consumerJob(FakeQueuedJob::class);
+
+        $dispatcher->dispatch(new JobProcessing(self::CONN, $job));
+        $dispatcher->dispatch(new JobProcessed(self::CONN, $job));
+
+        $metrics = $this->collectMetrics();
+
+        $this->assertSame([
+            'messaging.system' => 'redis',
+            'messaging.destination.name' => 'example-queue',
+            'laravel.queue.job.name' => FakeQueuedJob::class,
+            'laravel.queue.job.retried' => false,
+        ], $this->attributesOf($metrics['laravel.queue.job.finished']));
+
+        // duration には retried を付けない (counter だけの属性)。
+        $this->assertSame([
+            'messaging.system' => 'redis',
+            'messaging.destination.name' => 'example-queue',
+            'laravel.queue.job.name' => FakeQueuedJob::class,
+        ], $this->attributesOf($metrics['laravel.queue.job.duration']));
+    }
+
+    public function test_terminal_attribute_sets_are_pinned_on_failure(): void
+    {
+        $dispatcher = $this->subscribedDispatcher();
+        $job = $this->consumerJob(FakeQueuedJob::class, attempts: 2);
+
+        $dispatcher->dispatch(new JobProcessing(self::CONN, $job));
+        $dispatcher->dispatch(new JobFailed(self::CONN, $job, new RuntimeException('boom')));
+
+        $metrics = $this->collectMetrics();
+
+        $this->assertSame([
+            'messaging.system' => 'redis',
+            'messaging.destination.name' => 'example-queue',
+            'laravel.queue.job.name' => FakeQueuedJob::class,
+            'error.type' => RuntimeException::class,
+            'laravel.queue.job.retried' => true,
+        ], $this->attributesOf($metrics['laravel.queue.job.finished']));
+
+        $this->assertSame([
+            'messaging.system' => 'redis',
+            'messaging.destination.name' => 'example-queue',
+            'laravel.queue.job.name' => FakeQueuedJob::class,
+            'error.type' => RuntimeException::class,
+        ], $this->attributesOf($metrics['laravel.queue.job.duration']));
+    }
+
+    /**
+     * 開始時刻マップが終端・release・例外のいずれの経路でも空に戻ること。
+     *
+     * 残ると queue:work daemon の連想配列が job ごとに単調に伸び、数日〜数週間生きる worker では
+     * 最終的に OOMKilled (= 実行中 job の中断) になる。metrics は正常に出続けるので、症状は
+     * 「worker が定期的に再起動する」だけで計装が原因だと判らない。
+     */
+    public function test_start_map_is_emptied_on_a_terminal_outcome(): void
+    {
+        $dispatcher = $this->subscribedDispatcher();
+        $job = $this->consumerJob(FakeQueuedJob::class);
+
+        $dispatcher->dispatch(new JobProcessing(self::CONN, $job));
+        $this->assertNotSame([], $this->startMap(), '開始時刻が記録されていないとこの検査は無意味になる。');
+
+        $dispatcher->dispatch(new JobProcessed(self::CONN, $job));
+        $this->assertSame([], $this->startMap());
+    }
+
+    public function test_start_map_is_emptied_when_the_job_is_released(): void
+    {
+        $dispatcher = $this->subscribedDispatcher();
+        // release された attempt は終端ではないので counter は増えないが、開始時刻は掃除する必要がある。
+        $job = $this->consumerJob(FakeQueuedJob::class, released: true);
+
+        $dispatcher->dispatch(new JobProcessing(self::CONN, $job));
+        $this->assertNotSame([], $this->startMap());
+
+        $dispatcher->dispatch(new JobProcessed(self::CONN, $job));
+        $this->assertSame([], $this->startMap());
+    }
+
+    public function test_start_map_is_emptied_after_a_retryable_exception(): void
+    {
+        $dispatcher = $this->subscribedDispatcher();
+        $job = $this->consumerJob(FakeQueuedJob::class);
+
+        $dispatcher->dispatch(new JobProcessing(self::CONN, $job));
+        $this->assertNotSame([], $this->startMap());
+
+        $dispatcher->dispatch(new JobExceptionOccurred(self::CONN, $job, new RuntimeException('retry me')));
+        $this->assertSame([], $this->startMap());
     }
 
     /**
