@@ -6,17 +6,32 @@
 # can resolve Laravel 10 / 11 / 12 / 13 legs from composer.json alone.
 /composer.lock
 
-# PHPUnit
+# PHPUnit. `.phpunit.cache/` is the `cacheDirectory` declared in phpunit.xml.
 /.phpunit.cache/
+
+# Guards, not descriptions of the current toolchain: `composer check` produces none of these.
+# PHPStan leaves `tmpDir` unset, so it caches under the system temp directory rather than the
+# project; Pint writes no project-local cache; and every CI leg runs with `coverage: none`. They
+# are kept because an ad-hoc run still creates them — `phpunit --coverage-html coverage`,
+# php-cs-fixer invoked directly, or PHPUnit 9's result cache left over from an older checkout.
+/.phpstan.cache/
 /.phpunit.result.cache
 /build/
 /coverage/
-
-# PHPStan
-/.phpstan.cache/
+.php-cs-fixer.cache
 
 # Editors / OS
 /.idea/
 /.vscode/
 .DS_Store
-.php-cs-fixer.cache
+
+# Claude Code. Shared configuration stays committable on purpose (`.claude/settings.json`, and any
+# agents or commands the team decides to version); only these two are per-developer state.
+/.claude/settings.local.json
+/.claude/worktrees/
+
+# The package reads no env file of its own, so this is a guard for local experiments. It matters
+# because the repository is public: an accidental commit here is world-readable immediately, and
+# rewriting history does not unpublish it.
+/.env
+/.env.*
