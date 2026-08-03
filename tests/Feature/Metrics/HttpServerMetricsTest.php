@@ -571,7 +571,9 @@ class HttpServerMetricsTest extends TestCase
         });
 
         $this->assertMiddlewareIsHarmless($meterProvider);
-        $this->assertSame(1, $attempts, 'constructor は getMeter() まで到達している必要がある。');
+        // 2 回: 失敗 counter の生成 (FailureCounter) と histogram の生成。どちらも getMeter() で投げるが、
+        // どちらの経路も例外を外に出さない。
+        $this->assertSame(2, $attempts, 'constructor は getMeter() まで到達している必要がある。');
     }
 
     public function test_instrument_creation_failure_does_not_propagate_from_the_constructor(): void

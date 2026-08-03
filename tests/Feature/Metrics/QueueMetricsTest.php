@@ -523,10 +523,17 @@ class QueueMetricsTest extends TestCase
 
         // instrument に到達した 3 件 (enqueue / 成功終端 / 失敗終端)。markStarted と forgetStart は
         // instrument に触らないので、そちらの入口は job key 経路のテストで見る。
+        //
+        // 各失敗の直後に失敗 counter への記録が挟まる。この double は **失敗 counter も含めて全部の
+        // instrument を壊す** ので、この並びは「失敗 counter 自身が投げても listener の外に漏れない」
+        // (= FailureCounter::increment の二重ガードが効いている) ことまで同時に固定している。
         $this->assertSame([
             'messaging.client.sent.messages',
+            'laravel.otel_support.failures',
             'laravel.queue.job.finished',
+            'laravel.otel_support.failures',
             'laravel.queue.job.finished',
+            'laravel.otel_support.failures',
         ], $calls, 'listener が instrument の呼び出しまで到達している必要がある (到達しないなら無意味なテスト)。');
     }
 
@@ -557,7 +564,9 @@ class QueueMetricsTest extends TestCase
         $dispatcher->dispatch(new JobProcessing(self::CONN, $job));
         $dispatcher->dispatch(new JobProcessed(self::CONN, $job));
 
-        $this->assertSame(['add', 'record'], $calls, 'counter の後 histogram まで到達している必要がある。');
+        // 3 つ目の 'add' は失敗 counter の記録 (この double では createCounter が名前に関係なく同じ
+        // counter を返すため、失敗 counter の記録も 'add' として積まれる)。
+        $this->assertSame(['add', 'record', 'add'], $calls, 'counter の後 histogram まで到達している必要がある。');
     }
 
     public function test_job_key_failures_do_not_propagate_from_any_listener(): void
@@ -603,8 +612,15 @@ class QueueMetricsTest extends TestCase
         $dispatcher->dispatch(new JobProcessed(self::CONN, $job));
 
         $this->assertSame([JobFailed::class, JobProcessed::class], $ran);
+        // 失敗ごとに失敗 counter への記録が挟まる (この double はその counter も壊すので、そこで
+        // 投げても後続 listener が走ることまで同時に固定される)。
         $this->assertSame(
-            ['laravel.queue.job.finished', 'laravel.queue.job.finished'],
+            [
+                'laravel.queue.job.finished',
+                'laravel.otel_support.failures',
+                'laravel.queue.job.finished',
+                'laravel.otel_support.failures',
+            ],
             $calls,
             '計装が実際に投げる所まで到達している必要がある (到達しなければ後続が走るのは当たり前)。',
         );
@@ -620,7 +636,9 @@ class QueueMetricsTest extends TestCase
         });
 
         $metrics = new QueueMetrics($meterProvider);
-        $this->assertSame(1, $attempts, 'constructor は getMeter() まで到達している必要がある。');
+        // 2 回: 失敗 counter の生成 (FailureCounter) と instrument 3 本の生成。どちらも getMeter() で
+        // 投げるが、どちらの経路も例外を外に出さない。
+        $this->assertSame(2, $attempts, 'constructor は getMeter() まで到達している必要がある。');
 
         // Noop であることまで見る: フォールバックの代入だけを落とすと「未初期化プロパティ = Error」が
         // guard() に飲まれて黙るので、「例外が出ない」だけではガードの半分が抜けても気付けない。

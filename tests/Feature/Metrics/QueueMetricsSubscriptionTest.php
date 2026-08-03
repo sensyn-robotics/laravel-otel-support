@@ -126,7 +126,9 @@ class QueueMetricsSubscriptionTest extends TestCase
             $this->jobQueued('otel-test', 'id-1', new FakeQueuedJob),
         );
 
-        $this->assertSame(1, $attempts, '発火時解決で constructor が走り getMeter() まで到達している必要がある。');
+        // 2 回: 失敗 counter の生成 (FailureCounter) と計装本体の instrument 生成。どちらも getMeter() で
+        // 投げるが、どちらの経路も例外を外に出さないことをここで固定する。
+        $this->assertSame(2, $attempts, '発火時解決で constructor が走り getMeter() まで到達している必要がある。');
         $this->assertTrue(app()->resolved(QueueMetrics::class));
     }
 }
