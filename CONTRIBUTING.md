@@ -38,6 +38,12 @@ breaking any call site:
   in the OpenTelemetry semantic conventions: the version this package targets is declared in
   [src/Metrics/README.md](src/Metrics/README.md), and following a rename is a minor bump, never a patch.
 
+  *Changed*, not *added*. A **new metric** breaks nothing a consumer already queries, so it ships in a
+  patch — consumers on `^0.1` get it without a pull request, which is the point of putting it there.
+  A new **attribute on an existing metric** is not additive in the same way: it changes the identity of
+  that metric's series, which reads as a counter reset and breaks any query matching on the exact label
+  set, so treat it like a rename.
+
 ## Reporting a security issue
 
 Please do **not** open a public issue for security problems. Use GitHub's private vulnerability
