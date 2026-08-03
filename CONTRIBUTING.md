@@ -38,11 +38,22 @@ breaking any call site:
   in the OpenTelemetry semantic conventions: the version this package targets is declared in
   [src/Metrics/README.md](src/Metrics/README.md), and following a rename is a minor bump, never a patch.
 
-  *Changed*, not *added*. A **new metric** breaks nothing a consumer already queries, so it ships in a
-  patch — consumers on `^0.1` get it without a pull request, which is the point of putting it there.
-  A new **attribute on an existing metric** is not additive in the same way: it changes the identity of
-  that metric's series, which reads as a counter reset and breaks any query matching on the exact label
-  set, so treat it like a rename.
+### Adding a metric, as opposed to changing one
+
+> This is a **change to the release policy** rather than a consequence of the rule above, and it was
+> written alongside the first metric it applies to. Review it as its own decision: approving a metric
+> and approving this rule are two separate calls, and every `^0.1` consumer inherits whichever one
+> lands.
+
+The rule above is about a metric that **changes**. Pure additions are graded separately:
+
+- **A new metric ships in a patch.** Nothing a consumer already queries changes, so no dashboard,
+  recording rule or alert can break. Consumers on `^0.1` then pick it up through an ordinary
+  `composer update`, which is the point of shipping it — grading it as a minor (`0.2.0`) would put a
+  constraint-bump pull request in every consuming application in front of a purely additive change.
+- **A new attribute on an existing metric does not.** It changes the identity of that metric's series,
+  which reads as a counter reset and breaks any query matching on the exact label set. Treat it like a
+  rename: minor, never a patch.
 
 ## Reporting a security issue
 
