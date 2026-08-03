@@ -138,7 +138,7 @@ aggregates, so it can be incremented on the same hot paths at the cost of one se
 | Attribute | Values | Meaning |
 |---|---|---|
 | `laravel.otel_support.stage` | `build` | An instrument could not be created. The instrumentation falls back to a no-op one, so **everything it would have recorded is gone for the rest of the process**. |
-| | `record` | A single data point was dropped. |
+| | `record` | The recording of one event was abandoned. Usually that is a dropped data point; on the queue side it can also be the bookkeeping a later data point needs (`JobProcessing` storing the job's start time), in which case the *duration* of that job is what goes missing. |
 | | `flush` | `forceFlush` at a work boundary failed. The dirty flag survives, so it is retried at the next boundary. |
 | `laravel.otel_support.site` | `metrics.http` | The HTTP middleware (`Http/HttpServerMetrics.php`). |
 | | `metrics.queue` | The queue listeners (`Queue/QueueMetrics.php`). |
@@ -152,21 +152,33 @@ An unbounded label there would reproduce, on the one metric that only grows duri
 the cardinality amplification `http.request.method_original` is left out to avoid. When the exception
 itself is needed, turn on the SDK's own diagnostics (`OTEL_LOG_LEVEL`, `OTEL_PHP_LOG_DESTINATION`).
 
-**A zero is not proof that nothing failed.** Three cases are outside what the counter can see:
+**A zero is not proof that nothing failed.** These cases are outside what the counter can see — the
+first three because the counter's own destination is the thing that failed:
 
 - **The global meter provider could not be resolved.** `SafeGlobals` falls back to the API's
-  `NoopMeterProvider`, and a counter on a no-op provider goes nowhere. This is structural: the counter's
-  own destination is the thing that failed.
+  `NoopMeterProvider`, and a counter on a no-op provider goes nowhere.
+- **An instrument could not be built because the provider or the meter is what is broken.** Each
+  instrumentation builds the failure counter from that same provider before anything else, so it falls
+  back to a no-op counter for the same reason, and the `build` increment that follows goes nowhere.
+  **`build` therefore only ever covers a healthy provider on which one instrument could not be
+  created** — an invalid bucket list whose `Log::warning` throws, a missing facade root. Do not read
+  `build == 0` as "the instrumentation is alive".
 - **`WorkerFlusher` failed to flush the meter provider.** The increment happens, but the only thing that
   can deliver it is that same provider, so it surfaces only if a later boundary flushes successfully.
+- **The global *tracer* provider could not be resolved.** `SafeGlobals` falls back to the API's
+  `NoopTracerProvider`, which has no `forceFlush` at all, so `WorkerFlusher` skips it and reports
+  success. Nothing is counted under `worker_flusher.traces`, and spans simply never leave the process.
 - **A request whose HTTP method cannot be determined** (a malformed override making `getMethod()` throw)
   is *not* a failure by this definition: nothing is dropped, the data point is recorded with the
-  semconv-correct `_OTHER`. Count the `_OTHER` series itself if you need those.
+  semconv-correct `_OTHER`. Count the `_OTHER` series itself if you need those. It is also the one
+  guarded path an unauthenticated client can reach at will, so counting it would let a remote drive
+  this counter — and any alert on it — directly.
 
 The counter needs no switch of its own; it follows the ones already there. `metrics.enabled=false`
 registers neither instrumentation, so the `metrics.*` sites cannot fire, and `worker_flusher.enabled=false`
-does the same for the `worker_flusher.*` ones. With everything healthy the instrument exists but has no
-data points, so a working deployment pays nothing for it.
+does the same for the `worker_flusher.*` ones. Note that the *instrument* is created by each of the three
+independently, so `WorkerFlusher` alone is enough to register it. With everything healthy it holds no
+data points, but it is still one instrument in every collection — near-free rather than free.
 
 ## Semantic conventions
 

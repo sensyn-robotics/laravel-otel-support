@@ -30,13 +30,18 @@ use Throwable;
  * よって「たぶん投げない」に賭けず、両方を Throwable で受ける。ここで投げると「失敗を数える仕組み」が
  * 計装本体より広い blast radius を持つことになり本末転倒になる。
  *
- * **原理的に数えられない失敗が 2 つある。** どちらも counter の届け先そのものが壊れている場合:
+ * **原理的に数えられない失敗がある。** いずれも counter の届け先そのものが壊れている場合:
  *   - SafeGlobals::meterProvider() の失敗。倒す先は api の NoopMeterProvider なので、そこに積んだ
  *     counter はどこにも出ない。
+ *   - **MeterProvider / Meter 側が原因の instrument 構築失敗。** 各計装は同じ provider から
+ *     「まずこの counter を」作るので、原因が provider 側にあるならこの counter も同じ理由で
+ *     Noop に倒れ、直後の increment(STAGE_BUILD) はどこにも出ない。つまり stage=build が拾えるのは
+ *     **provider は健全で instrument だけ作れなかった場合** (Buckets::fromConfig の Log::warning が
+ *     投げた、facade root 未設定など) に限られる。「build が 0 = 計装は生きている」とは読めない。
  *   - WorkerFlusher の MeterProvider flush 失敗。回数は積まれるが、それを運ぶのは flush に失敗した
  *     その MeterProvider なので、後続の境界で flush が成功しない限り出ない。
  * 「counter が 0 である」ことは「失敗が無かった」ことの証明にはならない、という限界として
- * src/Metrics/README.md に明記してある。
+ * src/Metrics/README.md に一覧してある (traces 側の盲点も含む)。
  *
  * @internal 本パッケージの計装専用。消費側アプリ向けの API ではない。
  */

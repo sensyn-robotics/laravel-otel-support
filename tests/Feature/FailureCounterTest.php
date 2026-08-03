@@ -88,6 +88,34 @@ class FailureCounterTest extends TestCase
         $this->assertSame(['build|metrics.http' => 1], $this->failureCounts());
     }
 
+    public function test_a_broken_meter_provider_cannot_report_its_own_build_failure(): void
+    {
+        // **stage=build が拾えるのは「provider は健全だが instrument だけ作れない」場合に限られる。**
+        // 計装は同じ MeterProvider から先に FailureCounter を作る (HttpServerMetrics /
+        // QueueMetrics の constructor 冒頭) ので、instrument を作れない原因が provider / meter 側に
+        // あると、失敗 counter の createCounter も同じ理由で倒れて NoopCounter になり、直後の
+        // increment(build, ...) はどこにも出ない。
+        //
+        // つまり build を数える動機として src のコメントが挙げている代表例 (provider 側の故障で
+        // 計装が丸ごと Noop に落ちた) では数えられない。「build が 0 なら計装は生きている」と
+        // 読めないことを固定しておく (限界は src/Metrics/README.md の盲点一覧)。
+
+        // 対照: provider が健全なら build は数えられる。以降の陰性が「そもそも何も測れていない」
+        // だけではないことの裏取りになる。
+        new HttpServerMetrics($this->meterProviderThatFailsInstrumentBuild());
+        $this->assertSame(['build|metrics.http' => 1], $this->failureCounts());
+
+        // 本題: provider ごと壊れている場合は 1 件も増えない (cumulative なので値は据え置き)。
+        new HttpServerMetrics($this->meterProviderThatAlwaysThrows());
+        new QueueMetrics($this->meterProviderThatAlwaysThrows());
+
+        $this->assertSame(
+            ['build|metrics.http' => 1],
+            $this->failureCounts(),
+            '壊れた provider 側の build は、失敗 counter 自身も同じ理由で倒れるので観測できない。',
+        );
+    }
+
     public function test_http_record_failure_is_counted(): void
     {
         $middleware = new HttpServerMetrics($this->meterProviderThatFailsRecording());
@@ -416,6 +444,15 @@ class FailureCounterTest extends TestCase
 
             return $meter;
         });
+
+        return $meterProvider;
+    }
+
+    /** getMeter() が常に投げる MeterProvider (= provider / meter 側そのものが壊れている状況)。 */
+    private function meterProviderThatAlwaysThrows(): MeterProviderInterface
+    {
+        $meterProvider = Mockery::mock(MeterProviderInterface::class);
+        $meterProvider->shouldReceive('getMeter')->andThrow(new RuntimeException('meter provider exploded'));
 
         return $meterProvider;
     }
