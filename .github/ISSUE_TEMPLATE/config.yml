@@ -1,0 +1,26 @@
+# Issues stay enabled: this is the only public channel for anything that is not a security
+# vulnerability, and closing it entirely would leave people with no way to reach us at all.
+# What this configuration does is state the support policy at the entry point, so nobody
+# writes up a feature request or a support question before learning it is out of scope.
+#
+# Blank issues are disabled so that every new issue goes through a template carrying that
+# notice - the path to opening an issue is still open, it just is not a blank page.
+blank_issues_enabled: false
+
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/sensyn-robotics/laravel-otel-support/security/advisories/new
+    about: >-
+      Please do not open a public issue for security problems. Use GitHub's private
+      vulnerability reporting so we can triage it privately and publish an advisory.
+
+  - name: Support policy
+    url: https://github.com/sensyn-robotics/laravel-otel-support/blob/main/CONTRIBUTING.md
+    about: >-
+      This package is published for internal use at Sensyn Robotics. We do not accept external
+      contributions, and feature requests and support questions are out of scope. Read this
+      first.
+
+  - name: Documentation
+    url: https://github.com/sensyn-robotics/laravel-otel-support#readme
+    about: Installation, configuration reference and the metrics this package emits.

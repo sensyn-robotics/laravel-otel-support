@@ -1,0 +1,42 @@
+includes:
+    - vendor/phpstan/phpstan-mockery/extension.neon
+
+parameters:
+    level: 8
+
+    paths:
+        - src
+        - config
+        - tests
+
+    # The package requires illuminate/* components rather than laravel/framework, so make sure
+    # PHPStan knows the framework helper functions this code uses: config() / config_path() live
+    # in Foundation/helpers.php, env() in Support/helpers.php. Both paths exist in every
+    # supported major (verified on 10.50.2 / 11.55.0 / 12.64.0 / 13.23.0), and laravel/framework
+    # is always present in dev because orchestra/testbench requires it.
+    scanFiles:
+        - vendor/laravel/framework/src/Illuminate/Foundation/helpers.php
+        - vendor/laravel/framework/src/Illuminate/Support/helpers.php
+
+    # Framework PHPDoc is not treated as proof, so the runtime guards this package needs are not
+    # reported as "always true". Two concrete cases, both PHPDoc-only (no native types involved):
+    #
+    #   - Illuminate\Http\Request::route() is annotated
+    #     `($param is null ? \Illuminate\Routing\Route : object|string|null)` on Laravel 12+, but
+    #     the default route resolver is `function () { // }` (Request::getRouteResolver), so the
+    #     call really returns null whenever routing never matched - exactly the 404 / early-abort
+    #     requests HttpServerMetrics::terminate() still runs for. Dropping the `instanceof Route`
+    #     guard there would fatal on those requests.
+    #   - The queue events' `$job` promoted properties (JobProcessing, JobProcessed, JobFailed,
+    #     JobExceptionOccurred) are declared as plain `public $job` with only an `@param` tag, so
+    #     nothing enforces the type at runtime and QueueMetrics keeps checking it before calling
+    #     Job methods such as isReleased() / hasFailed().
+    #
+    # This only relaxes the always-true/always-false family of reports; every other level 8 check
+    # (including nullability of our own code) still applies. It is also version-proof: Laravel 10 /
+    # 11 annotate route() as `Route|object|string|null`, so an inline ignore written for the
+    # Laravel 12+ report would go unmatched - and fail - whenever analysis runs on an older major.
+    treatPhpDocTypesAsCertain: false
+
+    # No baseline on purpose: this package is small enough to stay green at level 8.
+    # Fix the code instead of adding entries here.

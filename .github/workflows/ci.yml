@@ -1,0 +1,199 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# This repository is public, so workflows also run for pull requests from forks.
+# Every action is therefore pinned to an immutable commit SHA (a tag can be moved
+# to point at different code) with the human-readable version in a trailing
+# comment, which is also what Dependabot reads when it bumps the pin.
+jobs:
+  tests:
+    name: Test (PHP ${{ matrix.php }} / Laravel ${{ matrix.laravel }} / ${{ matrix.deps }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Explicit pairs, not a cross product: Laravel 13 requires PHP >= 8.3, so there is no
+        # 8.2 leg for it. Only laravel/framework is pinned here - Testbench majors map 1:1
+        # onto Laravel majors (8 -> 10, 9 -> 11, 10 -> 12, 11 -> 13), so pinning the framework
+        # picks the Testbench major, while its *floor* stays under composer.json's control.
+        #
+        # composer.json declares `php: ^8.2` with no upper bound, so 8.5 is allowed and has to be
+        # covered: our own applications are already on `php ^8.4.1`. That leg is Laravel 13 only, on
+        # purpose. Nobody runs the newest PHP on a framework branch that is already past its security
+        # window (see the advisory escape hatch below), and Laravel 10 on PHP 8.5 emits 18
+        # deprecations from its own vendor tree - noise this package cannot fix, in a combination no
+        # consumer has.
+        include:
+          - { php: '8.2', laravel: '10.*', deps: lowest }
+          - { php: '8.2', laravel: '10.*', deps: highest }
+          - { php: '8.2', laravel: '11.*', deps: highest }
+          - { php: '8.3', laravel: '11.*', deps: highest }
+          - { php: '8.3', laravel: '12.*', deps: highest }
+          - { php: '8.4', laravel: '12.*', deps: highest }
+          - { php: '8.3', laravel: '13.*', deps: highest }
+          - { php: '8.4', laravel: '13.*', deps: highest }
+          - { php: '8.5', laravel: '13.*', deps: highest }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mbstring, json, tokenizer, xml
+          coverage: none
+          ini-values: memory_limit=512M
+
+      - name: Cache Composer downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/composer
+          key: composer-${{ matrix.php }}-${{ matrix.laravel }}-${{ matrix.deps }}-${{ hashFiles('composer.json') }}
+          restore-keys: |
+            composer-${{ matrix.php }}-${{ matrix.laravel }}-${{ matrix.deps }}-
+            composer-${{ matrix.php }}-${{ matrix.laravel }}-
+
+      # Composer >= 2.10 refuses to load versions with unfixed security advisories. Every
+      # Laravel 10 and 11 release is flagged (those branches are past their security window and
+      # the fixes only landed in 12+), so the matrix cannot resolve them without this escape
+      # hatch. It is scoped to laravel/framework and to this workflow only - it is not written
+      # to the committed composer.json, so advisories on every other package still block, and
+      # so do laravel/framework advisories for anyone installing this package.
+      - name: Allow advisories on the Laravel version under test
+        run: composer config --json policy.advisories.ignore '["laravel/framework"]'
+
+      - name: Pin Laravel for this leg
+        run: >-
+          composer require --dev --no-interaction --no-update
+          "laravel/framework:${{ matrix.laravel }}"
+
+      - name: Install dependencies
+        run: >-
+          composer update --prefer-dist --no-interaction --no-progress
+          ${{ matrix.deps == 'lowest' && '--prefer-lowest' || '' }}
+
+      - name: Show resolved versions
+        run: composer show --direct
+
+      - name: Run tests
+        run: vendor/bin/phpunit
+
+  static-analysis:
+    name: Static analysis (PHPStan)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, json, tokenizer, xml
+          coverage: none
+
+      - name: Cache Composer downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/composer
+          key: composer-static-analysis-${{ hashFiles('composer.json') }}
+          restore-keys: composer-static-analysis-
+
+      - name: Install dependencies
+        run: composer update --prefer-dist --no-interaction --no-progress
+
+      - name: Run PHPStan
+        run: vendor/bin/phpstan analyse --no-progress --memory-limit=1G
+
+  format:
+    name: Format (Pint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, json, tokenizer, xml
+          coverage: none
+
+      - name: Cache Composer downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/composer
+          key: composer-format-${{ hashFiles('composer.json') }}
+          restore-keys: composer-format-
+
+      - name: Install dependencies
+        run: composer update --prefer-dist --no-interaction --no-progress
+
+      - name: Run Pint
+        run: vendor/bin/pint --test
+
+  runtime-dependencies:
+    name: Runtime code depends on the OTel API only
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # open-telemetry/sdk is a dev dependency, so an accidental SDK import in src/ passes every other
+      # job: PHPStan and PHPUnit both analyse and run with the SDK present in vendor/. It only breaks
+      # in a consuming application that has no SDK installed - as a fatal error while the service
+      # provider registers, i.e. the application does not start. This job is the gate for that.
+      # open-telemetry/sem-conv (namespace OpenTelemetry\SemConv) is matched as well: it ships as a
+      # dependency of the SDK, which is why the semantic-convention names and values in src/ are
+      # string literals.
+      - name: Assert src/ and config/ do not reference the OTel SDK
+        run: |
+          # grep exits 1 when nothing matched, which is the success case here, so the shell's -e must
+          # not abort on it - and 2 or above means grep itself failed (a renamed directory, an
+          # unreadable file). Treating that as "no match" would leave a gate that silently passes
+          # without having looked at anything, so it is failed closed below.
+          status=0
+          matches=$(grep -rnE 'OpenTelemetry\\(SDK|SemConv|Contrib)' src config) || status=$?
+
+          if [ "$status" -eq 0 ]; then
+            printf '%s\n' "$matches"
+            echo "::error::Runtime code may only depend on open-telemetry/api and open-telemetry/context (see CONTRIBUTING.md)."
+            exit 1
+          fi
+
+          if [ "$status" -ne 1 ]; then
+            echo "::error::The gate did not run: grep exited with $status (did src/ or config/ move?)."
+            exit 1
+          fi
+
+          echo "OK: no SDK, SemConv or Contrib references in runtime code."
+
+  composer-validate:
+    name: Validate composer.json
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.4'
+          coverage: none
+
+      - name: Validate
+        run: composer validate --strict --no-check-lock
