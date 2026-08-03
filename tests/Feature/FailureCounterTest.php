@@ -30,6 +30,7 @@ use Sensyn\LaravelOTelSupport\Tests\Support\MakesQueueEvents;
 use Sensyn\LaravelOTelSupport\Tests\Support\RecordsMetrics;
 use Sensyn\LaravelOTelSupport\Tests\TestCase;
 use Sensyn\LaravelOTelSupport\WorkerFlusher;
+use Symfony\Component\HttpFoundation\Exception\SuspiciousOperationException;
 use Symfony\Component\HttpFoundation\Response;
 use Throwable;
 
@@ -97,6 +98,51 @@ class FailureCounterTest extends TestCase
         $middleware->terminate($request, $response);
 
         $this->assertSame(['record|metrics.http' => 1], $this->failureCounts());
+    }
+
+    public function test_the_other_method_fallback_is_not_counted_as_a_failure(): void
+    {
+        // 「_OTHER フォールバックは失敗として数えない」は意味論の選択ではなく、この counter に張る
+        // アラートの前提である。requestMethod() の catch は **未認証リモートが任意回数踏める唯一の
+        // 失敗経路** (不正な method override) なので、ここで数えると
+        // laravel.otel_support.failures が外部から自由に伸ばせる値になり、sum(rate(...)) > 0 の
+        // ようなアラートを remote が発報させられる。将来「数え漏れの修正」として善意で足されうる
+        // ため、陰性として固定する。実際 catch に increment を足す変異は、この 1 本が無いと
+        // 全テストをすり抜ける。
+        //
+        // ヘッダ経路を使うのは、enableHttpMethodParameterOverride() (プロセスグローバル) に依らず
+        // 常に読まれるため (getMethod は X-HTTP-METHOD-OVERRIDE を無条件に見る)。
+        $request = Request::create('https://example.test/things', 'POST');
+        $request->headers->set('X-HTTP-METHOD-OVERRIDE', 'ZZZ-ATTACKER-1');
+
+        // 前提を固定する: この入力で getMethod() が本当に投げること。投げないなら _OTHER の catch を
+        // 再現しておらず、テストが何も検証しないものに化ける。getMethod() は結果を memoize するので
+        // clone に対して呼ぶ (元の request で先に呼ぶと terminate() 側で投げなくなる)。
+        $thrown = null;
+        try {
+            (clone $request)->getMethod();
+        } catch (Throwable $e) {
+            $thrown = $e;
+        }
+        $this->assertInstanceOf(
+            SuspiciousOperationException::class,
+            $thrown,
+            'この入力で getMethod() が投げることが前提 (投げないなら _OTHER 経路を再現していない)。',
+        );
+
+        // 503 = ルーティング前に応答が確定した状況。この計装が getMethod() の最初の呼び出し者になる。
+        $middleware = new HttpServerMetrics($this->meterProvider);
+        $response = new Response('', 503);
+        $middleware->handle($request, fn () => $response);
+        $middleware->terminate($request, $response);
+
+        $metrics = $this->collectMetrics();
+        $this->assertSame(
+            '_OTHER',
+            $this->attributesOf($metrics['http.server.request.duration'])['http.request.method'],
+            'telemetry は落ちておらず、semconv 的に正しい _OTHER で記録されている必要がある。',
+        );
+        $this->assertSame([], $this->failureCounts(), '_OTHER は「計上を諦めた失敗」ではないので数えない。');
     }
 
     public function test_queue_instrument_build_failure_is_counted(): void
