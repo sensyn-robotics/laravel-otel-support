@@ -15,8 +15,10 @@ use OpenTelemetry\API\Metrics\LateBindingMeterProvider;
 use OpenTelemetry\API\Metrics\MeterInterface;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
 use OpenTelemetry\API\Metrics\Noop\NoopCounter;
+use OpenTelemetry\API\Trace\TracerProviderInterface;
 use OpenTelemetry\SDK\Metrics\Data\NumberDataPoint;
 use OpenTelemetry\SDK\Metrics\MeterProviderInterface as SdkMeterProvider;
+use OpenTelemetry\SDK\Trace\TracerProvider;
 use OpenTelemetry\SDK\Trace\TracerProviderInterface as SdkTracerProvider;
 use ReflectionProperty;
 use RuntimeException;
@@ -68,6 +70,11 @@ class FailureCounterTest extends TestCase
         (new QueueMetrics($this->meterProvider))->subscribe($dispatcher);
         $dispatcher->dispatch($this->jobQueued(self::CONN, 'id-1', new FakeQueuedJob));
 
+        // flush 経路も健全な provider で 1 境界通す。ここを通さないと「成功した flush まで数える」
+        // 退行 (forceFlush() の成功パスに increment を足す変異) が陰性対照をすり抜ける — 計装 2 種と
+        // 違い、flush 経路は他のどのテストからも counter を見られていない。
+        $this->flushAtOneJobBoundary(new TracerProvider, $this->meterProvider);
+
         $this->assertSame([], $this->failureCounts(), '正常系で失敗 counter に data point が出てはいけない。');
     }
 
@@ -118,26 +125,43 @@ class FailureCounterTest extends TestCase
         $tracerProvider = Mockery::mock(SdkTracerProvider::class);
         $tracerProvider->shouldReceive('forceFlush')->andThrow(new RuntimeException('trace flush exploded'));
 
-        // getMeter は本物に委譲する: 失敗 counter の届け先が壊れていると、そもそも観測できない
-        // (それがこの counter の構造的な限界で、README にも明記してある)。
-        $real = $this->meterProvider;
-        $meterProvider = Mockery::mock(SdkMeterProvider::class);
-        $meterProvider->shouldReceive('getMeter')->andReturnUsing(
-            fn (string $name): MeterInterface => $real->getMeter($name),
-        );
-        $meterProvider->shouldReceive('forceFlush')->andThrow(new RuntimeException('metric flush exploded'));
-
-        $dispatcher = new Dispatcher;
-        (new WorkerFlusher($tracerProvider, $meterProvider))->subscribe($dispatcher);
-
-        $dispatcher->dispatch(new JobProcessing(self::CONN, Mockery::mock(Job::class)));
-        $this->assertNotFalse($dispatcher->until(new Looping(self::CONN, 'default')));
+        $this->flushAtOneJobBoundary($tracerProvider, $this->meterProviderThatFailsToFlush());
 
         // 並びは failureCounts() の ksort 順 (metrics -> traces)。
         $this->assertSame([
             'flush|worker_flusher.metrics' => 1,
             'flush|worker_flusher.traces' => 1,
         ], $this->failureCounts());
+    }
+
+    public function test_a_trace_flush_failure_is_counted_only_under_the_traces_site(): void
+    {
+        // **非対称なケースが要る**。両方を失敗させるテストだけでは、site を signal に割り当てている
+        // 2 引数 (WorkerFlusher::flush) を入れ替えても結果集合が変わらず、変異が生き残る。site を
+        // signal 別にした唯一の理由は「片方だけ恒常的に失敗している状態を切り分ける」ことなので、
+        // 対応が逆でも緑ならその投資は回帰から守られていない。しかも metrics 側は「壊れた
+        // MeterProvider 自身が運ぶので届かないことがある」既知の盲点付きで、ラベルが逆だと
+        // 『届かないはずの系列が見えている』という誤った調査に直結する。
+        //
+        // meter は本物 (flush も成功する) なので、metrics 側の系列が **出ないこと** まで完全一致で
+        // 固定できる。これは「成功した flush まで数える」退行も同時に落とす。
+        $tracerProvider = Mockery::mock(SdkTracerProvider::class);
+        $tracerProvider->shouldReceive('forceFlush')->andThrow(new RuntimeException('trace flush exploded'));
+
+        $this->flushAtOneJobBoundary($tracerProvider, $this->meterProvider);
+
+        $this->assertSame(['flush|worker_flusher.traces' => 1], $this->failureCounts());
+    }
+
+    public function test_a_metric_flush_failure_is_counted_only_under_the_metrics_site(): void
+    {
+        // 上の裏返し。tracer 側は成功するので traces の系列が出ないことまで固定する。
+        $tracerProvider = Mockery::mock(SdkTracerProvider::class);
+        $tracerProvider->shouldReceive('forceFlush')->andReturn(true);
+
+        $this->flushAtOneJobBoundary($tracerProvider, $this->meterProviderThatFailsToFlush());
+
+        $this->assertSame(['flush|worker_flusher.metrics' => 1], $this->failureCounts());
     }
 
     public function test_metric_identity_and_attribute_set_are_pinned(): void
@@ -252,6 +276,40 @@ class FailureCounterTest extends TestCase
         $failures = new FailureCounter($provider);
         $this->assertInstanceOf(NoopCounter::class, $this->counterOf($failures));
         $failures->increment(FailureCounter::STAGE_BUILD, FailureCounter::SITE_HTTP);
+    }
+
+    /**
+     * WorkerFlusher を購読させ、queue worker のジョブ境界 (JobProcessing -> Looping) を 1 回通す。
+     *
+     * until() の戻りも見る: Looping リスナが false を返すと daemonShouldRun() が worker を止めるので、
+     * flush 経路のテストは「数えたか」と同時に「worker を止めていないか」も担保する必要がある。
+     */
+    private function flushAtOneJobBoundary(TracerProviderInterface $tracerProvider, MeterProviderInterface $meterProvider): void
+    {
+        $dispatcher = new Dispatcher;
+        (new WorkerFlusher($tracerProvider, $meterProvider))->subscribe($dispatcher);
+
+        $dispatcher->dispatch(new JobProcessing(self::CONN, Mockery::mock(Job::class)));
+        $this->assertNotFalse($dispatcher->until(new Looping(self::CONN, 'default')));
+    }
+
+    /**
+     * forceFlush() だけが投げる MeterProvider。
+     *
+     * getMeter は本物に委譲する: 失敗 counter の届け先まで壊すと、そもそも観測できない
+     * (それがこの counter の構造的な限界で、src/Metrics/README.md にも明記してある)。
+     */
+    private function meterProviderThatFailsToFlush(): MeterProviderInterface
+    {
+        $real = $this->meterProvider;
+
+        $meterProvider = Mockery::mock(SdkMeterProvider::class);
+        $meterProvider->shouldReceive('getMeter')->andReturnUsing(
+            fn (string $name): MeterInterface => $real->getMeter($name),
+        );
+        $meterProvider->shouldReceive('forceFlush')->andThrow(new RuntimeException('metric flush exploded'));
+
+        return $meterProvider;
     }
 
     private function counterOf(FailureCounter $failures): CounterInterface
