@@ -18,11 +18,18 @@ use Throwable;
  *
  * **この counter 自身が例外を上げないことが全体の前提**なので、生成と記録の両方を飲む。api の
  * interface に「投げない」保証は無く、実装側には実在の throw 経路がある:
- *   - 生成: SDK autoload が Globals に載せる MeterProvider は LateBindingMeterProvider で、その
- *     getMeter() が返す LateBindingMeter は **createCounter() の時点で** factory (= Globals の
- *     初期化 + MeterProviderFactory) を走らせる (vendor/open-telemetry/api/Metrics/LateBindingMeter.php,
- *     sdk/SdkAutoloader::createLateBindingMeterProvider)。つまり SafeGlobals の try/catch を抜けた
- *     後、計装の constructor の中で初期化の失敗が飛んでくる。
+ *   - 生成: 受け取るのは api の MeterProviderInterface で、この interface に「投げない」保証は無い。
+ *     Globals::meterProvider() は Context に載った provider を先に見るため実装は差し替わりうるし、
+ *     api 自身が **factory の実行を createCounter() まで遅らせる型** を持っている
+ *     (LateBindingMeterProvider -> LateBindingMeter::createCounter が factory を走らせる。SDK autoload は
+ *     auto-instrumentation へ渡す InstrumentationContext でこれを使う)。つまり「provider を受け取れた」
+ *     ことは「instrument を作れる」ことを意味せず、SafeGlobals の try/catch はこの型より外側にしか
+ *     張れない。
+ *     なお **SDK の初期化そのものの失敗はここには来ない**: SdkAutoloader の環境変数初期化は
+ *     MeterProviderFactory を eager に走らせて実 SDK の MeterProvider を Globals に載せる
+ *     (SdkAutoloader::environmentBasedInitializer)。その中で投げれば Globals::globals() が自前で飲み、
+ *     noop configurator のまま NoopMeterProvider が返る。伝播するのは飲んだ後の logWarning が
+ *     アプリ logger 経由で投げた場合で、それを受けるのは SafeGlobals である (同 docblock)。
  *   - 記録: add() は SDK 側で属性を組み立て、値が不正なら AttributesBuilder が logWarning する。
  *     その落ち先は既定で LoggerHolder のアプリ logger (Laravel なら Monolog) なので、logger が
  *     投げれば add() から伝播する (OTEL_PHP_LOG_DESTINATION=trigger_error なら Laravel の

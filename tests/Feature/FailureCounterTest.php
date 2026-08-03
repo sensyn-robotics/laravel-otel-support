@@ -316,13 +316,19 @@ class FailureCounterTest extends TestCase
     }
 
     /**
-     * 二重ガードが要る根拠を upstream に対して固定する。
+     * 構築ガードが要る根拠 = 「provider を受け取れても instrument を作れるとは限らない」を
+     * upstream に対して固定する。
      *
-     * SDK autoload が Globals に載せる MeterProvider は LateBindingMeterProvider で、getMeter() は
-     * factory を走らせずに LateBindingMeter を返す。factory (= Globals の初期化) が走るのは
-     * createCounter() の時点なので、初期化の失敗は SafeGlobals の try/catch を抜けた後、計装の
-     * constructor の中で飛んでくる。ここが遅延しなくなったら FailureCounter の構築ガードの根拠が
-     * 変わるので、その時に気付けるようにしておく。
+     * api の LateBindingMeterProvider は getMeter() では factory を走らせず LateBindingMeter を返し、
+     * factory が走るのは **createCounter() の時点** である。つまり provider の生成が成功した後、
+     * SafeGlobals の try/catch を抜けた先で初めて失敗しうる型が api に実在する。ここが遅延しなくなったら
+     * 構築ガードの根拠が変わるので、その時に気付けるようにしておく。
+     *
+     * **この型が Globals 経由で本パッケージに来るわけではない。** SdkAutoloader が
+     * createLateBindingMeterProvider() を使うのは auto-instrumentation へ渡す InstrumentationContext
+     * だけで (SdkAutoloader::registerInstrumentations)、Globals に載るのは environmentBasedInitializer が
+     * eager に作る実 SDK の MeterProvider である。よってこれは「api の契約上ありうる実装」に対する
+     * 保険であって、現行の配線の再現ではない (現行配線の前提は FailureCounter の docblock)。
      */
     public function test_a_late_binding_meter_provider_defers_a_creation_failure_to_the_instrument(): void
     {
