@@ -73,6 +73,27 @@ class WorkerFlusherTest extends TestCase
         $this->tracerProvider->getTracer('test')->spanBuilder('job-span')->startSpan()->end();
     }
 
+    /**
+     * export された metric の名前一覧を返す。
+     *
+     * 「metrics が flush された」の検証に collect() の非空判定を使ってはいけない: WorkerFlusher の
+     * constructor は失敗が 1 件も無くても FailureCounter を作るので、instrument
+     * laravel.otel_support.failures が MeterProvider に登録され、**data point 0 件の空メトリクスとして
+     * 毎回 export に載る**。つまり非空判定はアプリ側のメトリクスが 1 件も出ていなくても成立してしまい、
+     * flush 経路が壊れても落ちないアサーションになる。名前で絞って初めて境界の flush を検証できる。
+     *
+     * @return list<string>
+     */
+    private function exportedMetricNames(): array
+    {
+        $names = [];
+        foreach ($this->metricExporter->collect(true) as $metric) {
+            $names[] = $metric->name;
+        }
+
+        return $names;
+    }
+
     public function test_looping_flushes_span_after_a_job(): void
     {
         $dispatcher = $this->subscribedDispatcher();
@@ -92,8 +113,8 @@ class WorkerFlusherTest extends TestCase
         $dispatcher->dispatch(new JobProcessing('redis', Mockery::mock(Job::class)));
         $dispatcher->until(new Looping('redis', 'default'));
 
-        // forceFlush で ExportingReader が export しなければ exporter は空のまま。
-        $this->assertNotEmpty($this->metricExporter->collect(true));
+        // forceFlush で ExportingReader が export しなければアプリ側の instrument は出てこない。
+        $this->assertContains('jobs', $this->exportedMetricNames());
     }
 
     public function test_looping_listener_does_not_halt_the_worker(): void
@@ -144,7 +165,7 @@ class WorkerFlusherTest extends TestCase
         $dispatcher->dispatch(WorkerFlusher::OCTANE_REQUEST_TERMINATED);
 
         $this->assertCount(1, $this->spanExporter->getSpans());
-        $this->assertNotEmpty($this->metricExporter->collect(true));
+        $this->assertContains('requests', $this->exportedMetricNames());
     }
 
     public function test_meter_is_flushed_even_when_the_tracer_flush_fails(): void
@@ -163,8 +184,9 @@ class WorkerFlusherTest extends TestCase
         $dispatcher->until(new Looping('redis', 'default'));
 
         $this->assertSame(1, $attempts, 'tracer の forceFlush まで到達している必要がある。');
-        $this->assertNotEmpty(
-            $this->metricExporter->collect(true),
+        $this->assertContains(
+            'jobs',
+            $this->exportedMetricNames(),
             'tracer の flush 失敗で meter の flush が飛んではいけない。',
         );
     }
