@@ -157,6 +157,14 @@ invalid bucket list logs a single `warning` naming the config key, from where th
 The middleware is a singleton, so that is one line per request under FPM and one line per worker under
 Octane — still a steady stream if the value is left wrong. Treat it as something to fix, not to filter.
 
+Not logging is not the same as saying nothing, though. What each guard leaves behind is a *count*:
+`laravel.otel_support.failures`, incremented with the stage (`build` / `record` / `flush`) and the site
+that contained the failure. A counter aggregates, so unlike a log line it can be written on those same
+hot paths without amplifying an incident. It carries no exception class, and there are cases it cannot
+see by construction (a broken meter provider cannot deliver a metric about itself), so **a zero on it is
+not proof that nothing failed**. The attribute values and the blind spots are listed in
+[src/Metrics/README.md](src/Metrics/README.md#instrumentation-failures).
+
 Wiring is fail-open too. The provider only *registers listeners* during `boot()`; `WorkerFlusher` itself
 is built the first time one of those events fires, and the global tracer and meter providers are
 resolved through the same guarded factory as the instrumentation. A broken `Globals` therefore cannot
@@ -218,6 +226,10 @@ exporter and the auto-instrumentation (`open-telemetry/sdk`, `open-telemetry/exp
 - `src/SafeGlobals.php`: resolves the global tracer / meter provider and falls back to the API's Noop
   providers if `Globals` throws. Both providers inject through it, which is what keeps a telemetry
   misconfiguration out of the application's own code paths.
+- `src/FailureCounter.php`: counts what the fail-open guards swallow (`laravel.otel_support.failures`).
+  It sits under the umbrella rather than in `src/Metrics/` because the instrumentation *and*
+  `WorkerFlusher` report through it. Its own construction and recording are guarded as well — the
+  class docblock lists the upstream paths on which creating or writing a counter really can throw.
 
 ## Development
 

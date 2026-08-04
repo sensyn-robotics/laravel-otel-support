@@ -61,6 +61,8 @@ class WorkerFlusher
 
     private MeterProviderInterface $meterProvider;
 
+    private FailureCounter $failures;
+
     /** 前回 flush 以降に作業をしたか。アイドルのポーリング周回での無駄 flush を避ける。 */
     private bool $pending = false;
 
@@ -68,6 +70,9 @@ class WorkerFlusher
     {
         $this->tracerProvider = $tracerProvider;
         $this->meterProvider = $meterProvider;
+        // 生成も記録も FailureCounter 側が飲むので、constructor が新たな throw 源にはならない
+        // (この constructor は listener の遅延解決 = worker / dispatch 元のコードパス上で走る)。
+        $this->failures = new FailureCounter($meterProvider);
     }
 
     /**
@@ -166,8 +171,8 @@ class WorkerFlusher
         // 落ちる = 後の provider が worker の生存中一度も flush されない状態が固定される。
         // (TracerProvider::forceFlush は実在の throw 経路を持つ: BatchSpanProcessor::flush() は
         // 直接 forceFlush された場合 $propagateResult=true で、捕まえた例外を再 throw する。)
-        $tracer = $this->forceFlush($this->tracerProvider);
-        $meter = $this->forceFlush($this->meterProvider);
+        $tracer = $this->forceFlush($this->tracerProvider, FailureCounter::SITE_FLUSH_TRACES);
+        $meter = $this->forceFlush($this->meterProvider, FailureCounter::SITE_FLUSH_METRICS);
 
         return $tracer && $meter;
     }
@@ -175,9 +180,10 @@ class WorkerFlusher
     /**
      * provider 1 つを flush する。失敗は呼び出し側に漏らさず false で返す。
      *
+     * @param  string  $site  失敗を数えるときの signal 別ラベル (FailureCounter::SITE_FLUSH_*)
      * @return bool flush が例外なく完了したか
      */
-    private function forceFlush(object $provider): bool
+    private function forceFlush(object $provider, string $site): bool
     {
         try {
             // forceFlush() は API の provider interface には無く SDK 実装にしか無い。signal 未有効時は
@@ -212,6 +218,12 @@ class WorkerFlusher
             //     Octane worker 側の後処理 (sandbox の破棄) に例外が漏れる。
             // 作業自体は完了済みなのでロスは無く、pending は落とさないので次の境界で再試行される。
             // ログは出さない (guard 方針は HttpServerMetrics::terminate() と同じ: Log 自体が throw 源)。
+            //
+            // かわりに回数だけ counter に積む。ただし **MeterProvider 側の失敗はこの counter でも
+            // 観測しきれない**: 積んだ data point を運ぶのが、いま flush に失敗したその MeterProvider
+            // だからで、後続の境界で flush が成功しない限り出ない (限界は src/Metrics/README.md)。
+            $this->failures->increment(FailureCounter::STAGE_FLUSH, $site);
+
             return false;
         }
     }

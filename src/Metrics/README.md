@@ -17,6 +17,9 @@ takes care of merging and publishing the config in one place (`metrics.*` in
 - `MetricsServiceProvider.php`: middleware registration and queue listener subscription (it only reads
   `otel-support.metrics.*`).
 - `../../config/otel-support.php`: buckets and the other settings, under `metrics.*`.
+- `../FailureCounter.php`: **not part of this module.** It sits under the umbrella because
+  `WorkerFlusher` reports through it too, but the metric it emits is catalogued here with the rest — see
+  [Instrumentation failures](#instrumentation-failures).
 
 ## Recorded metrics
 
@@ -26,13 +29,17 @@ takes care of merging and publishing the config in one place (`metrics.*` in
 | `messaging.client.sent.messages` | Counter | `{message}` | Number of enqueued messages |
 | `laravel.queue.job.finished` | Counter | `{job}` | Jobs reaching a terminal outcome (final success / failure, retries included) |
 | `laravel.queue.job.duration` | Histogram | `s` | Duration of the terminal attempt |
+| `laravel.otel_support.failures` | Counter | `{failure}` | Failures contained by the fail-open guards of this package ([details](#instrumentation-failures)) |
 
 - Where the meaning matches semconv ([HTTP](https://opentelemetry.io/docs/specs/semconv/http/) /
   [Messaging](https://opentelemetry.io/docs/specs/semconv/messaging/)), the semconv name is used.
-- Where semconv has no equivalent, the domain name `laravel.queue.*` is used instead.
+- Where semconv has no equivalent, the domain name `laravel.queue.*` is used instead — and
+  `laravel.otel_support.*` for the package's own self-diagnostics, which no convention covers.
 - Attributes also follow semconv wherever possible.
 - The meter (instrumentation scope) names are `laravel-otel-support.metrics.http` and
-  `laravel-otel-support.metrics.queue`.
+  `laravel-otel-support.metrics.queue`; `laravel.otel_support.failures` uses the umbrella scope
+  `laravel-otel-support`, because it is emitted from the whole package rather than from one
+  instrumentation (the source is carried in an attribute instead).
 - Per metric:
   - `messaging.client.sent.messages` carries the attribute set semconv specifies for that metric:
     `messaging.operation.name` (`send`) and `messaging.system` (both Required), plus
@@ -116,8 +123,62 @@ takes care of merging and publishing the config in one place (`metrics.*` in
   key cannot be read). The queue listeners run on the application's own call stack — `JobQueued` fires
   inline inside `dispatch()`, `JobProcessing` fires before `$job->fire()`, and the listener that writes
   `failed_jobs` is registered *after* ours on `JobFailed` — so the instrumentation never lets its own
-  failure escape, and it never logs one either. See
+  failure escape, and it never logs one either. What it does do is count the drop in
+  `laravel.otel_support.failures`. See
   [the fail-open contract](../../README.md#the-instrumentation-never-breaks-the-application).
+
+## Instrumentation failures
+
+`laravel.otel_support.failures` is the package reporting on itself. Every entry point the framework
+calls into is fail-open and **none of those paths log** — they run per request and per job, so a log
+line would amplify an outage instead of reporting it. Without a counter a contained failure is
+indistinguishable from "this code never ran", because both look like missing telemetry. A counter
+aggregates, so it can be incremented on the same hot paths at the cost of one series.
+
+| Attribute | Values | Meaning |
+|---|---|---|
+| `laravel.otel_support.stage` | `build` | An instrument could not be created. The instrumentation falls back to a no-op one, so **everything it would have recorded is gone for the rest of the process**. |
+| | `record` | The recording of one event was abandoned. Usually that is a dropped data point; on the queue side it can also be the bookkeeping a later data point needs (`JobProcessing` storing the job's start time), in which case the *duration* of that job is what goes missing. |
+| | `flush` | `forceFlush` at a work boundary failed. The dirty flag survives, so it is retried at the next boundary. |
+| `laravel.otel_support.site` | `metrics.http` | The HTTP middleware (`Http/HttpServerMetrics.php`). |
+| | `metrics.queue` | The queue listeners (`Queue/QueueMetrics.php`). |
+| | `worker_flusher.traces` / `worker_flusher.metrics` | `WorkerFlusher`, per signal — the two are flushed independently so that one failing does not skip the other, and the counter keeps that granularity. |
+
+What the counter deliberately does **not** carry is the exception class (semconv's `error.type`). The
+exceptions reaching these guards come from the SDK's internals, the application's logger (any Monolog
+handler) and the exporter's transport, so the set of values is **not bounded by this package**; the
+recording paths run per request, and the HTTP one is reachable by an unauthenticated client at will.
+An unbounded label there would reproduce, on the one metric that only grows during an incident, exactly
+the cardinality amplification `http.request.method_original` is left out to avoid. When the exception
+itself is needed, turn on the SDK's own diagnostics (`OTEL_LOG_LEVEL`, `OTEL_PHP_LOG_DESTINATION`).
+
+**A zero is not proof that nothing failed.** These cases are outside what the counter can see — the
+first three because the counter's own destination is the thing that failed:
+
+- **The global meter provider could not be resolved.** `SafeGlobals` falls back to the API's
+  `NoopMeterProvider`, and a counter on a no-op provider goes nowhere.
+- **An instrument could not be built because the provider or the meter is what is broken.** Each
+  instrumentation builds the failure counter from that same provider before anything else, so it falls
+  back to a no-op counter for the same reason, and the `build` increment that follows goes nowhere.
+  **`build` therefore only ever covers a healthy provider on which one instrument could not be
+  created** — an invalid bucket list whose `Log::warning` throws, a missing facade root. Do not read
+  `build == 0` as "the instrumentation is alive".
+- **`WorkerFlusher` failed to flush the meter provider.** The increment happens, but the only thing that
+  can deliver it is that same provider, so it surfaces only if a later boundary flushes successfully.
+- **The global *tracer* provider could not be resolved.** `SafeGlobals` falls back to the API's
+  `NoopTracerProvider`, which has no `forceFlush` at all, so `WorkerFlusher` skips it and reports
+  success. Nothing is counted under `worker_flusher.traces`, and spans simply never leave the process.
+- **A request whose HTTP method cannot be determined** (a malformed override making `getMethod()` throw)
+  is *not* a failure by this definition: nothing is dropped, the data point is recorded with the
+  semconv-correct `_OTHER`. Count the `_OTHER` series itself if you need those. It is also the one
+  guarded path an unauthenticated client can reach at will, so counting it would let a remote drive
+  this counter — and any alert on it — directly.
+
+The counter needs no switch of its own; it follows the ones already there. `metrics.enabled=false`
+registers neither instrumentation, so the `metrics.*` sites cannot fire, and `worker_flusher.enabled=false`
+does the same for the `worker_flusher.*` ones. Note that the *instrument* is created by each of the three
+independently, so `WorkerFlusher` alone is enough to register it. With everything healthy it holds no
+data points, but it is still one instrument in every collection — near-free rather than free.
 
 ## Semantic conventions
 

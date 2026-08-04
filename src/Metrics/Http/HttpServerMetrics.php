@@ -10,6 +10,7 @@ use OpenTelemetry\API\Metrics\MeterProviderInterface;
 use OpenTelemetry\API\Metrics\Noop\NoopMeter;
 use OpenTelemetry\Context\Context;
 use OpenTelemetry\Context\ContextInterface;
+use Sensyn\LaravelOTelSupport\FailureCounter;
 use Sensyn\LaravelOTelSupport\Metrics\Buckets;
 use Symfony\Component\HttpFoundation\Response;
 use Throwable;
@@ -53,8 +54,14 @@ class HttpServerMetrics
 
     private HistogramInterface $duration;
 
+    private FailureCounter $failures;
+
     public function __construct(MeterProviderInterface $meterProvider)
     {
+        // 失敗 counter を先に作る (この後の構築が失敗したら、その回数をこれで数えるため)。生成も
+        // 記録も FailureCounter 側が飲むので、ここを try で囲む必要は無い。
+        $this->failures = new FailureCounter($meterProvider);
+
         try {
             $buckets = Buckets::fromConfig('otel-support.metrics.http.buckets', Buckets::DEFAULT_HTTP);
 
@@ -85,6 +92,9 @@ class HttpServerMetrics
             // 新たな throw 源にならないこと)。プロパティは非 null のまま埋まるので record 側は変更不要。
             // ログは出さない (terminate() と同じ理由: Log 自体が throw 源で、hot path では増幅する)。
             $this->duration = (new NoopMeter)->createHistogram('http.server.request.duration');
+            // 代わりに回数だけ残す。ここに落ちると以降このプロセスの HTTP metrics は丸ごと出なくなるが、
+            // 例外もログも出ないため、数えないと「計装が黙って Noop に落ちた」ことを外から区別できない。
+            $this->failures->increment(FailureCounter::STAGE_BUILD, FailureCounter::SITE_HTTP);
         }
     }
 
@@ -129,7 +139,9 @@ class HttpServerMetrics
             // telemetry の欠損として出る方が、アプリの挙動を変えるより望ましい)。
             //
             // ログは出さない: 上記のうち少なくとも scheme 経路は remote が任意回数踏めるので、
-            // 1 リクエスト 1 行でもログ増幅 (ログストアへの DoS) になる。
+            // 1 リクエスト 1 行でもログ増幅 (ログストアへの DoS) になる。かわりに回数だけ counter に
+            // 積む (counter は集約されるので、remote が任意回数踏んでも系列は 1 本のまま増幅しない)。
+            $this->failures->increment(FailureCounter::STAGE_RECORD, FailureCounter::SITE_HTTP);
         }
     }
 
@@ -226,6 +238,10 @@ class HttpServerMetrics
             // getRealMethod() (生の REQUEST_METHOD = この経路では必ず POST) には倒さない: 不正な override を
             // 正常な POST 系列に混ぜて見えなくする上に、戻り値が strtoupper(mixed) 依存で新たな例外源に
             // なり得る。ログも出さない (未認証リモートが任意回数踏める入力なのでログ増幅になる)。
+            //
+            // 失敗 counter にも積まない。ここは telemetry を落としていない (data point は semconv 的に
+            // 正しい _OTHER で残る) ので、「計上を諦めた失敗」を数える counter の対象ではない。
+            // 未知メソッドの件数が要るなら _OTHER 系列そのものを見ればよい。
             return self::OTHER_METHOD;
         }
 

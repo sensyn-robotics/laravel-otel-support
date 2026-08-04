@@ -16,6 +16,7 @@ use OpenTelemetry\API\Metrics\CounterInterface;
 use OpenTelemetry\API\Metrics\HistogramInterface;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
 use OpenTelemetry\API\Metrics\Noop\NoopMeter;
+use Sensyn\LaravelOTelSupport\FailureCounter;
 use Sensyn\LaravelOTelSupport\Metrics\Buckets;
 use Throwable;
 
@@ -75,11 +76,17 @@ class QueueMetrics
 
     private HistogramInterface $duration;
 
+    private FailureCounter $failures;
+
     /** @var array<string, float> job key => 処理開始時刻 */
     private array $start = [];
 
     public function __construct(MeterProviderInterface $meterProvider)
     {
+        // 失敗 counter を先に作る (この後の構築が失敗したら、その回数をこれで数えるため)。生成も
+        // 記録も FailureCounter 側が飲むので、ここを try で囲む必要は無い。
+        $this->failures = new FailureCounter($meterProvider);
+
         try {
             $buckets = Buckets::fromConfig('otel-support.metrics.queue.duration_buckets', Buckets::DEFAULT_QUEUE);
 
@@ -118,6 +125,9 @@ class QueueMetrics
             $this->sent = $noop->createCounter('messaging.client.sent.messages');
             $this->finished = $noop->createCounter('laravel.queue.job.finished');
             $this->duration = $noop->createHistogram('laravel.queue.job.duration');
+            // 代わりに回数だけ残す。ここに落ちると以降このプロセスの queue metrics は丸ごと出なくなるが、
+            // 例外もログも出ないため、数えないと「計装が黙って Noop に落ちた」ことを外から区別できない。
+            $this->failures->increment(FailureCounter::STAGE_BUILD, FailureCounter::SITE_QUEUE);
         }
     }
 
@@ -210,7 +220,8 @@ class QueueMetrics
      * 計装の失敗は telemetry の欠損として出す方がアプリの挙動を変えるより望ましいので、記録を諦める。
      * ログは出さない: (a) Log::warning 自体が新たな throw 源 (Monolog の channel 未定義 / 書き込み不能)、
      * (b) poison pill 化した job が無限に release されるとログも無限に増える。可観測性が必要になったら
-     * OTel 内部ログ (LogsMessagesTrait) 側に寄せる。
+     * OTel 内部ログ (LogsMessagesTrait) 側に寄せる。かわりに回数だけ counter に積む (counter は
+     * 集約されるので、(b) の無限 release でも系列は 1 本のまま = ログのようには増幅しない)。
      *
      * @param  Closure(): void  $work
      */
@@ -220,6 +231,7 @@ class QueueMetrics
             $work();
         } catch (Throwable) {
             // 意図的に飲む (理由は上の docblock)。5 メソッドに catch をコピペせずここ 1 箇所に集約する。
+            $this->failures->increment(FailureCounter::STAGE_RECORD, FailureCounter::SITE_QUEUE);
         }
     }
 

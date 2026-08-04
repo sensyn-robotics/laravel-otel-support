@@ -111,6 +111,7 @@ runs against the old one.
 | a metric, attribute key or attribute value | `src/Metrics/README.md`, including the semconv version it declares |
 | a config option | the inline default at the call site **and** the config table in `README.md` |
 | the shipped `config/otel-support.php` | keep it free of package class references — consumers keep a published copy, and a missing class there is a boot-time fatal `config:clear` cannot fix |
+| a new fail-open guard (`catch` in `src/`) | a `FailureCounter::increment()` in it, or a comment saying why that path is not a failure — plus the test that pins it |
 | anything in `src/` | a matching test |
 | an action pin in `.github/workflows/` | the trailing `# vX.Y.Z` comment — Dependabot reads it |
 
@@ -124,7 +125,10 @@ runs against the old one.
   failure shows up as missing telemetry, not as changed behaviour. The recording and flushing paths do
   not log; the one exception is `Buckets::fromConfig()`, which warns on an invalid bucket list from
   where the instrument is built. The middleware is a singleton, so that is one line per request under
-  FPM and one per worker under Octane. Do not add a second one.
+  FPM and one per worker under Octane. Do not add a second one. What those paths do instead is count
+  the failure (`src/FailureCounter.php`) — that is the observability hook for a new guard; extend it
+  rather than reaching for a log line, and keep it incapable of throwing (its own construction and
+  recording are both guarded, for reasons its docblock records).
 - [Conventional Commits](https://www.conventionalcommits.org/); open pull requests as **draft** first.
   Every pull request targeting `main` needs an approval from `@sensyn-robotics/infra` (see
   `.github/CODEOWNERS`). Note that a draft pull request does not request that review automatically —
