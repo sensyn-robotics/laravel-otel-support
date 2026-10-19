@@ -241,4 +241,5 @@ the end of the request under FPM, but only the end of the worker's life in a lon
   the first `Looping` rather than at the first job, so that the idle flushes keep their start time
   recent.
 
-All of it is behind `worker_flusher.enabled`.
+All of the flushing is behind `worker_flusher.enabled`. Creating the queue instruments at the first
+`Looping` is part of the queue instrumentation, so it follows `metrics.queue.enabled` instead.

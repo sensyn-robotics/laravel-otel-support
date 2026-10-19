@@ -273,7 +273,8 @@ class WorkerFlusher
             //     無効化されうる。
             //   - Octane の RequestTerminated は ApplicationGateway が応答後に dispatch する。投げると
             //     Octane worker 側の後処理 (sandbox の破棄) に例外が漏れる。
-            // 作業自体は完了済みなのでロスは無く、pending は落とさないので次の境界で再試行される。
+            // 作業自体は完了済みなのでロスは無く、pending は落とさないので次の境界で再試行される
+            // (アイドル中の metrics の flush は再試行しない。flushMetrics() 参照)。
             // ログは出さない (guard 方針は HttpServerMetrics::terminate() と同じ: Log 自体が throw 源)。
             //
             // かわりに回数だけ counter に積む。ただし **MeterProvider 側の失敗はこの counter でも

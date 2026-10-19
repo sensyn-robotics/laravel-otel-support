@@ -113,10 +113,10 @@ class QueueMetrics
             );
         } catch (Throwable) {
             // 構築の失敗も listener と同じく飲む (理由は guard())。ここは subscribeLazily による遅延解決
-            // なので、構築は「queue イベントの初回発火点」= アプリの dispatch() 内 (JobQueued) か worker の
-            // JobProcessing で走る。つまり投げれば着弾点はその発火点そのもので、guard() が守っている
-            // blast radius (dispatch() 呼び出し元への伝播 / 未実行 job の release・偽 failure) を
-            // そのまま引き起こす。しかも singleton は失敗した構築をキャッシュしないため、以後の全
+            // なので、構築は「queue イベントの初回発火点」= アプリの dispatch() 内 (JobQueued)、queue:work の
+            // 最初の Looping、--once では JobProcessing で走る。つまり投げれば着弾点はその発火点そのもので、
+            // guard() が守っている blast radius (dispatch() 呼び出し元への伝播 / Looping なら queue:work の
+            // 異常終了 / 未実行 job の release・偽 failure) をそのまま引き起こす。しかも singleton は失敗した構築をキャッシュしないため、以後の全
             // イベントで投げ続ける。handler 本体の try/catch では救えない (Dispatcher が本体呼び出しの
             // 前に make() する) ので、ここで受ける必要がある。
             //
@@ -169,8 +169,8 @@ class QueueMetrics
      *
      * SDK は instrument を作った時の start を MeterProvider ごとに 1 回だけ決め、後から作った instrument の
      * stream もその時刻から始まる。最初のジョブで初めて作ると、それまでのアイドル中の flush
-     * (WorkerFlusher) がこの stream の start を進められず、最初のジョブの data point の start が worker の
-     * 起動まで遡る。Looping は queue:work の中でしか発火しないので、web リクエストでは構築されない。
+     * (WorkerFlusher) がこの stream の start を進められず、最初のジョブの data point の start が
+     * MeterProvider で最初に instrument を作った時刻 (通常は worker の最初の Looping) まで遡る。Looping は queue:work の中でしか発火しないので、web リクエストでは構築されない。
      */
     public function prepare(): void {}
 

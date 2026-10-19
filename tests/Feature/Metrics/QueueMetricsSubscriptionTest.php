@@ -196,4 +196,23 @@ class QueueMetricsSubscriptionTest extends TestCase
         $this->assertSame(2, $attempts, '発火時解決で constructor が走り getMeter() まで到達している必要がある。');
         $this->assertTrue(app()->resolved(QueueMetrics::class));
     }
+
+    public function test_constructor_failure_does_not_halt_the_worker_at_the_first_loop(): void
+    {
+        // queue:work では最初の Looping で構築される。Looping は Worker::daemonShouldRun() から until() で
+        // 発火し、囲む try/catch が無いので、漏れると queue:work が異常終了する。
+        $attempts = 0;
+        $meterProvider = Mockery::mock(MeterProviderInterface::class);
+        $meterProvider->shouldReceive('getMeter')->andReturnUsing(function () use (&$attempts): MeterInterface {
+            $attempts++;
+            throw new RuntimeException('meter provider exploded');
+        });
+
+        app()->when(QueueMetrics::class)
+            ->needs(MeterProviderInterface::class)
+            ->give(fn (): MeterProviderInterface => $meterProvider);
+
+        $this->assertNotFalse(app(Dispatcher::class)->until(new Looping('otel-test', 'default')));
+        $this->assertSame(2, $attempts, '発火時解決で constructor が走り getMeter() まで到達している必要がある。');
+    }
 }
