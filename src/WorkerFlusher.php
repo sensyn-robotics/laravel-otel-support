@@ -226,12 +226,15 @@ class WorkerFlusher
      *
      * 失敗しても時刻は進める。失敗した flush を周回ごとに再試行すると、Looping の頻度で flush と失敗の
      * 記録が続く。作業が残っている分の再試行は pending 側が受け持つ。
+     * 時刻は flush が終わってから取る。collector に届かず exporter の timeout と retry で間隔を使い切ると、
+     * 次の周回ですぐまた flush することになり、アイドル中の周回が毎回ブロックされる。
      */
     private function flushMetrics(): bool
     {
+        $flushed = $this->forceFlush($this->meterProvider, FailureCounter::SITE_FLUSH_METRICS);
         $this->lastMetricsFlushAt = $this->clock->now();
 
-        return $this->forceFlush($this->meterProvider, FailureCounter::SITE_FLUSH_METRICS);
+        return $flushed;
     }
 
     /**

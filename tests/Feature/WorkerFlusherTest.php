@@ -449,4 +449,34 @@ class WorkerFlusherTest extends TestCase
 
         $this->assertSame(10, $attempts);
     }
+
+    public function test_idle_interval_counts_from_the_end_of_a_slow_flush(): void
+    {
+        // collector に届かない時は exporter の timeout と retry で flush が間隔より長くかかりうる。開始時刻から
+        // 数えると、次の周回ですぐまた flush してアイドル中の周回が毎回ブロックされる。
+        $attempts = 0;
+        $clock = new TestClock;
+        $meterProvider = Mockery::mock(MeterProviderInterface::class);
+        $meterProvider->shouldReceive('getMeter')->andReturn((new NoopMeterProvider)->getMeter('test'));
+        $meterProvider->shouldReceive('forceFlush')->andReturnUsing(function () use (&$attempts, $clock): bool {
+            $attempts++;
+            $clock->advanceSeconds(65);
+
+            return false;
+        });
+        $dispatcher = new Dispatcher;
+        (new WorkerFlusher($this->tracerProvider, $meterProvider, $clock))->subscribe($dispatcher);
+
+        $clock->advanceSeconds(60);
+        $dispatcher->until(new Looping('redis', 'default'));
+        $this->assertSame(1, $attempts);
+
+        $clock->advanceSeconds(3);
+        $dispatcher->until(new Looping('redis', 'default'));
+        $this->assertSame(1, $attempts, '遅い flush の直後の周回で、また flush してはいけない。');
+
+        $clock->advanceSeconds(57);
+        $dispatcher->until(new Looping('redis', 'default'));
+        $this->assertSame(2, $attempts);
+    }
 }
