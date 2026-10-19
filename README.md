@@ -184,7 +184,10 @@ inert.
 
   Also consider it when **synchronous export per unit of work becomes a measurable cost** — a
   high-throughput queue, or a high-RPS Octane service (today the flush runs on every job and every
-  Octane request; deltas mean it does not double-count).
+  Octane request; deltas mean it does not double-count). An idle `queue:work` worker also flushes
+  metrics once a minute, so that the start time of a series first seen after a long idle stretch stays
+  recent; OTLP backends that fill in a zero sample at the start time only do so within a few minutes of
+  the first sample.
 
   Note that traces and metrics are the only signals this flushes. The **logs signal is deliberately
   out of scope**, because these services log to stdout rather than through an OTLP exporter — if that

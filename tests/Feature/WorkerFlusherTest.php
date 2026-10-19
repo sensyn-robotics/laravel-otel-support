@@ -10,8 +10,11 @@ use Illuminate\Queue\Events\Looping;
 use Illuminate\Queue\Events\WorkerStopping;
 use Mockery;
 use OpenTelemetry\API\Common\Time\Clock;
+use OpenTelemetry\API\Common\Time\TestClock;
 use OpenTelemetry\API\Metrics\Noop\NoopMeterProvider;
 use OpenTelemetry\API\Trace\NoopTracerProvider;
+use OpenTelemetry\SDK\Metrics\Data\Sum;
+use OpenTelemetry\SDK\Metrics\Data\Temporality;
 use OpenTelemetry\SDK\Metrics\MeterProviderBuilder;
 use OpenTelemetry\SDK\Metrics\MeterProviderInterface;
 use OpenTelemetry\SDK\Metrics\MetricExporter\InMemoryExporter as MetricInMemoryExporter;
@@ -348,5 +351,79 @@ class WorkerFlusherTest extends TestCase
         $this->endOneSpan();
         $dispatcher->until(new Looping('redis', 'default'));
         $this->assertCount(1, $this->spanExporter->getSpans());
+    }
+
+    public function test_idle_loop_flushes_only_metrics_once_the_interval_has_passed(): void
+    {
+        $clock = new TestClock;
+        $dispatcher = new Dispatcher;
+        (new WorkerFlusher($this->tracerProvider, $this->meterProvider, $clock))->subscribe($dispatcher);
+
+        $this->endOneSpan();
+        $this->meterProvider->getMeter('test')->createCounter('jobs')->add(1);
+
+        $clock->advanceSeconds(59);
+        $dispatcher->until(new Looping('redis', 'default'));
+        $this->assertNotContains('jobs', $this->exportedMetricNames());
+
+        $clock->advanceSeconds(1);
+        $dispatcher->until(new Looping('redis', 'default'));
+        $this->assertContains('jobs', $this->exportedMetricNames());
+        // traces は作業が無ければ溜まらない前提なので、アイドルの flush では触らない。
+        $this->assertCount(0, $this->spanExporter->getSpans());
+    }
+
+    public function test_job_flush_restarts_the_idle_interval(): void
+    {
+        $clock = new TestClock;
+        $dispatcher = new Dispatcher;
+        (new WorkerFlusher($this->tracerProvider, $this->meterProvider, $clock))->subscribe($dispatcher);
+        $counter = $this->meterProvider->getMeter('test')->createCounter('jobs');
+
+        $clock->advanceSeconds(50);
+        $dispatcher->dispatch(new JobProcessing('redis', Mockery::mock(Job::class)));
+        $dispatcher->until(new Looping('redis', 'default'));
+        $this->exportedMetricNames();
+
+        // 起動からは 60 秒を超えたが、ジョブ境界の flush からはまだ 50 秒。
+        $counter->add(1);
+        $clock->advanceSeconds(50);
+        $dispatcher->until(new Looping('redis', 'default'));
+        $this->assertNotContains('jobs', $this->exportedMetricNames());
+    }
+
+    public function test_idle_flush_keeps_the_start_of_a_new_series_recent(): void
+    {
+        // 狙いは export 先で系列の先頭に 0 を補えるようにすること: delta の data point の start は前回 collect
+        // した時刻なので、アイドル中の flush があれば、久しぶりのジョブで初めて出た系列の start がそこまでしか遡らない。
+        $clock = new TestClock;
+        $exporter = new MetricInMemoryExporter(temporality: Temporality::DELTA);
+        $meterProvider = (new MeterProviderBuilder)
+            ->addReader(new ExportingReader($exporter))
+            ->setClock($clock)
+            ->build();
+        $dispatcher = new Dispatcher;
+        (new WorkerFlusher($this->tracerProvider, $meterProvider, $clock))->subscribe($dispatcher);
+        $counter = $meterProvider->getMeter('test')->createCounter('jobs');
+
+        $clock->advanceSeconds(60);
+        $dispatcher->until(new Looping('redis', 'default'));
+        $idleFlushedAt = $clock->now();
+
+        $clock->advanceSeconds(30);
+        $dispatcher->dispatch(new JobProcessing('redis', Mockery::mock(Job::class)));
+        $counter->add(1, ['outcome' => 'first-seen']);
+        $dispatcher->until(new Looping('redis', 'default'));
+
+        $starts = [];
+        foreach ($exporter->collect(true) as $metric) {
+            if ($metric->name === 'jobs') {
+                $this->assertInstanceOf(Sum::class, $metric->data);
+                foreach ($metric->data->dataPoints as $point) {
+                    $starts[] = $point->startTimestamp;
+                }
+            }
+        }
+        $this->assertSame([$idleFlushedAt], $starts);
     }
 }
