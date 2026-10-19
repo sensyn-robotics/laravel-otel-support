@@ -426,4 +426,27 @@ class WorkerFlusherTest extends TestCase
         }
         $this->assertSame([$idleFlushedAt], $starts);
     }
+
+    public function test_failed_idle_flush_waits_for_the_next_interval(): void
+    {
+        // 失敗した idle flush を周回ごとに再試行すると、Looping の頻度 (sleep 秒ごと) で flush と失敗の記録が続く。
+        $attempts = 0;
+        $meterProvider = Mockery::mock(MeterProviderInterface::class);
+        $meterProvider->shouldReceive('getMeter')->andReturn((new NoopMeterProvider)->getMeter('test'));
+        $meterProvider->shouldReceive('forceFlush')->andReturnUsing(function () use (&$attempts): bool {
+            $attempts++;
+            throw new RuntimeException('force flush exploded');
+        });
+        $clock = new TestClock;
+        $dispatcher = new Dispatcher;
+        (new WorkerFlusher($this->tracerProvider, $meterProvider, $clock))->subscribe($dispatcher);
+
+        // 3 秒おきの Looping で 10 分アイドルする。
+        for ($i = 0; $i < 200; $i++) {
+            $clock->advanceSeconds(3);
+            $this->assertNotFalse($dispatcher->until(new Looping('redis', 'default')));
+        }
+
+        $this->assertSame(10, $attempts);
+    }
 }

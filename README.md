@@ -111,7 +111,7 @@ php artisan vendor:publish --tag=otel-support-config
 | `metrics.http.buckets` | `OTEL_METRICS_HTTP_BUCKETS` | semconv recommendation | Bucket boundaries of the HTTP duration histogram (seconds, comma-separated) |
 | `metrics.queue.enabled` | – | `true` | Queue metrics instrumentation on/off |
 | `metrics.queue.duration_buckets` | `OTEL_METRICS_QUEUE_DURATION_BUCKETS` | semconv recommendation | Bucket boundaries of the job duration histogram (seconds, comma-separated) |
-| `worker_flusher.enabled` | `OTEL_WORKER_FLUSH_ENABLED` | `true` | `forceFlush` at the work boundaries of long-lived processes (queue-worker jobs, Octane requests) on/off |
+| `worker_flusher.enabled` | `OTEL_WORKER_FLUSH_ENABLED` | `true` | `forceFlush` at the work boundaries of long-lived processes (queue-worker jobs, Octane requests), and of metrics while a queue worker is idle, on/off |
 
 Bucket lists may be unordered and contain duplicates (they are sorted and de-duplicated), and invalid
 values (empty, non-numeric) fall back to the default.
@@ -187,7 +187,8 @@ inert.
   Octane request; deltas mean it does not double-count). An idle `queue:work` worker also flushes
   metrics once a minute, so that the start time of a series first seen after a long idle stretch stays
   recent; OTLP backends that fill in a zero sample at the start time only do so within a few minutes of
-  the first sample.
+  the first sample. This covers queue workers only: an idle Octane worker has no loop event to flush
+  on, and a job that runs for several minutes still pushes its first sample past that window.
 
   Note that traces and metrics are the only signals this flushes. The **logs signal is deliberately
   out of scope**, because these services log to stdout rather than through an OTLP exporter — if that

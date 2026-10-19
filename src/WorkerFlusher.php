@@ -68,6 +68,8 @@ class WorkerFlusher
      * 前回のジョブや worker の起動まで遡る。cumulative 化した系列を Prometheus 互換の backend が OTLP で
      * 取り込む時、start の位置に 0 の sample を補うのは start が sample から 5 分以内の場合だけなので、
      * 遡りすぎると 0 が入らず、increase() がその系列の最初の増分を落とす。5 分より十分短く取る。
+     * Looping はジョブを取る前に発火するので、ジョブ中に初めて出た系列では、この間隔にジョブ待ちの時間と
+     * ジョブの実行時間が足される。数分かかるジョブの系列には効かない。
      */
     private const IDLE_METRICS_FLUSH_INTERVAL_NANOS = 60 * ClockInterface::NANOS_PER_SECOND;
 

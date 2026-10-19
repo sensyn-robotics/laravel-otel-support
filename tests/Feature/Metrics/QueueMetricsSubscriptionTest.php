@@ -2,19 +2,29 @@
 
 namespace Sensyn\LaravelOTelSupport\Tests\Feature\Metrics;
 
+use ArrayObject;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Queue\Job;
 use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
+use Illuminate\Queue\Events\Looping;
 use Mockery;
+use OpenTelemetry\API\Common\Time\ClockInterface;
+use OpenTelemetry\API\Common\Time\TestClock;
 use OpenTelemetry\API\Metrics\MeterInterface;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
+use OpenTelemetry\SDK\Metrics\Data\Sum;
+use OpenTelemetry\SDK\Metrics\Data\Temporality;
+use OpenTelemetry\SDK\Metrics\MeterProviderBuilder;
+use OpenTelemetry\SDK\Metrics\MetricExporter\InMemoryExporter;
+use OpenTelemetry\SDK\Metrics\MetricReader\ExportingReader;
 use RuntimeException;
 use Sensyn\LaravelOTelSupport\Metrics\Queue\QueueMetrics;
 use Sensyn\LaravelOTelSupport\Tests\Support\FakeQueuedJob;
 use Sensyn\LaravelOTelSupport\Tests\Support\MakesQueueEvents;
 use Sensyn\LaravelOTelSupport\Tests\Support\RecordsMetrics;
 use Sensyn\LaravelOTelSupport\Tests\TestCase;
+use Sensyn\LaravelOTelSupport\WorkerFlusher;
 
 /**
  * provider が実際に使う購読経路 (QueueMetrics::subscribeLazily) の担保。
@@ -103,6 +113,61 @@ class QueueMetricsSubscriptionTest extends TestCase
 
         $this->assertTrue(app()->resolved(QueueMetrics::class));
         $this->assertArrayHasKey('messaging.client.sent.messages', $this->collectMetrics());
+    }
+
+    public function test_instruments_built_at_the_first_loop_get_a_recent_start_after_idling(): void
+    {
+        // SDK は instrument を作った時の start を MeterProvider ごとに 1 回だけ決める。最初のジョブで初めて
+        // instrument を作ると、それまでの WorkerFlusher の idle flush が効かず start が worker の起動まで遡る。
+        $clock = new TestClock;
+        $exporter = new InMemoryExporter(new ArrayObject, Temporality::DELTA);
+        $meterProvider = (new MeterProviderBuilder)
+            ->addReader(new ExportingReader($exporter))
+            ->setClock($clock)
+            ->build();
+        config(['queue.connections.otel-test.driver' => 'redis']);
+        app()->when(QueueMetrics::class)
+            ->needs(MeterProviderInterface::class)
+            ->give(fn (): MeterProviderInterface => $meterProvider);
+        app()->when(WorkerFlusher::class)
+            ->needs(MeterProviderInterface::class)
+            ->give(fn (): MeterProviderInterface => $meterProvider);
+        app()->when(WorkerFlusher::class)
+            ->needs(ClockInterface::class)
+            ->give(fn (): ClockInterface => $clock);
+
+        $job = Mockery::mock(Job::class);
+        $job->shouldReceive('uuid')->andReturn('uuid-1');
+        $job->shouldReceive('payload')->andReturn([]);
+        $job->shouldReceive('getQueue')->andReturn('example-queue');
+        $job->shouldReceive('attempts')->andReturn(1);
+        $job->shouldReceive('resolveName')->andReturn(FakeQueuedJob::class);
+        $job->shouldReceive('isReleased')->andReturn(false);
+        $job->shouldReceive('hasFailed')->andReturn(false);
+
+        $events = app(Dispatcher::class);
+        $this->assertNotFalse($events->until(new Looping('otel-test', 'default')));
+        $this->assertTrue(app()->resolved(QueueMetrics::class));
+
+        $clock->advanceSeconds(60);
+        $events->until(new Looping('otel-test', 'default'));
+        $idleFlushedAt = $clock->now();
+
+        $clock->advanceSeconds(30);
+        $events->dispatch(new JobProcessing('otel-test', $job));
+        $events->dispatch(new JobProcessed('otel-test', $job));
+        $events->until(new Looping('otel-test', 'default'));
+
+        $starts = [];
+        foreach ($exporter->collect(true) as $metric) {
+            if ($metric->name === 'laravel.queue.job.finished') {
+                $this->assertInstanceOf(Sum::class, $metric->data);
+                foreach ($metric->data->dataPoints as $point) {
+                    $starts[] = $point->startTimestamp;
+                }
+            }
+        }
+        $this->assertSame([$idleFlushedAt], $starts);
     }
 
     public function test_constructor_failure_does_not_propagate_through_the_lazily_resolved_listener(): void

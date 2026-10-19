@@ -10,6 +10,7 @@ use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
 use Illuminate\Queue\Events\JobQueued;
+use Illuminate\Queue\Events\Looping;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Str;
 use OpenTelemetry\API\Metrics\CounterInterface;
@@ -48,6 +49,7 @@ class QueueMetrics
         JobProcessed::class => 'recordProcessed',
         JobFailed::class => 'recordFailed',
         JobExceptionOccurred::class => 'forgetStart',
+        Looping::class => 'prepare',
     ];
 
     /**
@@ -161,6 +163,16 @@ class QueueMetrics
             $events->listen($event, [self::class, $method]);
         }
     }
+
+    /**
+     * worker のループ先頭で instrument を作っておく。記録はしない (構築は listener の解決で済む)。
+     *
+     * SDK は instrument を作った時の start を MeterProvider ごとに 1 回だけ決め、後から作った instrument の
+     * stream もその時刻から始まる。最初のジョブで初めて作ると、それまでのアイドル中の flush
+     * (WorkerFlusher) がこの stream の start を進められず、最初のジョブの data point の start が worker の
+     * 起動まで遡る。Looping は queue:work の中でしか発火しないので、web リクエストでは構築されない。
+     */
+    public function prepare(): void {}
 
     public function recordEnqueued(JobQueued $e): void
     {
