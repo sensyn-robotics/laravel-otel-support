@@ -111,7 +111,7 @@ php artisan vendor:publish --tag=otel-support-config
 | `metrics.http.buckets` | `OTEL_METRICS_HTTP_BUCKETS` | semconv recommendation | Bucket boundaries of the HTTP duration histogram (seconds, comma-separated) |
 | `metrics.queue.enabled` | – | `true` | Queue metrics instrumentation on/off |
 | `metrics.queue.duration_buckets` | `OTEL_METRICS_QUEUE_DURATION_BUCKETS` | semconv recommendation | Bucket boundaries of the job duration histogram (seconds, comma-separated) |
-| `worker_flusher.enabled` | `OTEL_WORKER_FLUSH_ENABLED` | `true` | `forceFlush` at the work boundaries of long-lived processes (queue-worker jobs, Octane requests) on/off |
+| `worker_flusher.enabled` | `OTEL_WORKER_FLUSH_ENABLED` | `true` | `forceFlush` at the work boundaries of long-lived processes (queue-worker jobs, Octane requests), plus a once-a-minute metrics flush while a queue worker is idle, on/off |
 
 Bucket lists may be unordered and contain duplicates (they are sorted and de-duplicated), and invalid
 values (empty, non-numeric) fall back to the default.
@@ -184,7 +184,15 @@ inert.
 
   Also consider it when **synchronous export per unit of work becomes a measurable cost** — a
   high-throughput queue, or a high-RPS Octane service (today the flush runs on every job and every
-  Octane request; deltas mean it does not double-count).
+  Octane request; deltas mean it does not double-count). An idle `queue:work` worker also flushes
+  metrics once a minute, so that the start time of a series first seen after a long idle stretch stays
+  recent. Some OTLP backends fill in a zero sample at the start time only when it is within 5 minutes of
+  the first sample. This covers the instruments that already exist at the time of the flush, which is
+  why the package's queue instruments are created at the first loop; an application's own instrument
+  created lazily inside a job is not covered. It also covers queue workers only: an idle Octane worker
+  has no loop event to flush on, and a job that runs for several minutes still pushes its first sample
+  past that window. While the collector is unreachable, each idle flush blocks the loop for the
+  exporter's timeout and retries, as the flush after a job already does.
 
   Note that traces and metrics are the only signals this flushes. The **logs signal is deliberately
   out of scope**, because these services log to stdout rather than through an OTLP exporter — if that

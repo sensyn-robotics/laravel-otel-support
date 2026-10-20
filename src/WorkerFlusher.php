@@ -6,6 +6,8 @@ use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Queue\Events\JobProcessing;
 use Illuminate\Queue\Events\Looping;
 use Illuminate\Queue\Events\WorkerStopping;
+use OpenTelemetry\API\Common\Time\Clock;
+use OpenTelemetry\API\Common\Time\ClockInterface;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
 use OpenTelemetry\API\Trace\TracerProviderInterface;
 use Throwable;
@@ -21,6 +23,7 @@ use Throwable;
  *     JobProcessed / JobFailed は採用できない。Looping はループ先頭 (= 前ジョブの span は end 済み) かつ
  *     getNextJob のブロック前に発火するので、次のジョブを待たずに直前のジョブを flush できる。
  *     最終ジョブはループに戻らないので WorkerStopping で拾う。
+ *     ジョブが来ない間も、metrics だけは一定間隔で flush する (理由は IDLE_METRICS_FLUSH_INTERVAL_NANOS)。
  *   - Octane (FrankenPHP / Swoole / RoadRunner) の HTTP worker: 1 プロセスが数百〜数千リクエストを
  *     処理するので、リクエスト終了時に flush しないと HTTP metrics が worker の recycle まで出ない。
  *     Octane の RequestTerminated でリクエスト境界を拾い、FPM と同じ「リクエスト終了時に export」に揃える。
@@ -57,22 +60,45 @@ class WorkerFlusher
         self::OCTANE_REQUEST_TERMINATED => 'flushRequest',
     ];
 
+    /**
+     * ジョブが来ない間に metrics を flush する間隔。
+     *
+     * delta temporality の data point の start は「その stream を前回 collect した時刻」になる。ジョブが来ない
+     * 間 collect しないと、次のジョブで初めて出る系列 (新しいジョブ名、めったに出ない失敗) の start が
+     * 前回のジョブや worker の起動まで遡る。cumulative 化した系列を Prometheus 互換の backend が OTLP で
+     * 取り込む時、start の位置に 0 の sample を補うのは start が sample から 5 分以内の場合だけなので、
+     * 遡りすぎると 0 が入らず、increase() がその系列の最初の増分を落とす。5 分より十分短く取る。
+     * Looping はジョブを取る前に発火するので、ジョブ中に初めて出た系列では、この間隔にジョブ待ちの時間と
+     * ジョブの実行時間が足される。数分かかるジョブの系列には効かない。
+     */
+    private const IDLE_METRICS_FLUSH_INTERVAL_NANOS = 60 * ClockInterface::NANOS_PER_SECOND;
+
     private TracerProviderInterface $tracerProvider;
 
     private MeterProviderInterface $meterProvider;
 
     private FailureCounter $failures;
 
+    private ClockInterface $clock;
+
     /** 前回 flush 以降に作業をしたか。アイドルのポーリング周回での無駄 flush を避ける。 */
     private bool $pending = false;
 
-    public function __construct(TracerProviderInterface $tracerProvider, MeterProviderInterface $meterProvider)
-    {
+    /** metrics を最後に flush した (または flush を試みた) 時刻。 */
+    private int $lastMetricsFlushAt;
+
+    public function __construct(
+        TracerProviderInterface $tracerProvider,
+        MeterProviderInterface $meterProvider,
+        ?ClockInterface $clock = null,
+    ) {
         $this->tracerProvider = $tracerProvider;
         $this->meterProvider = $meterProvider;
         // 生成も記録も FailureCounter 側が飲むので、constructor が新たな throw 源にはならない
         // (この constructor は listener の遅延解決 = worker / dispatch 元のコードパス上で走る)。
         $this->failures = new FailureCounter($meterProvider);
+        $this->clock = $clock ?? Clock::getDefault();
+        $this->lastMetricsFlushAt = $this->clock->now();
     }
 
     /**
@@ -128,10 +154,14 @@ class WorkerFlusher
      *
      * Looping はループ先頭。前ジョブの span は end 済みで、getNextJob のブロック前なので即時 flush に
      * なる。最終ジョブはループに戻らず停止するので WorkerStopping で残りを flush する。
+     * 作業が無い周回でも、前回の metrics flush から IDLE_METRICS_FLUSH_INTERVAL_NANOS 経っていれば
+     * metrics だけ flush する。
      */
     public function flushIfPending(): void
     {
         if (! $this->pending) {
+            $this->flushIdleMetrics();
+
             return;
         }
 
@@ -172,9 +202,39 @@ class WorkerFlusher
         // (TracerProvider::forceFlush は実在の throw 経路を持つ: BatchSpanProcessor::flush() は
         // 直接 forceFlush された場合 $propagateResult=true で、捕まえた例外を再 throw する。)
         $tracer = $this->forceFlush($this->tracerProvider, FailureCounter::SITE_FLUSH_TRACES);
-        $meter = $this->forceFlush($this->meterProvider, FailureCounter::SITE_FLUSH_METRICS);
+        $meter = $this->flushMetrics();
 
         return $tracer && $meter;
+    }
+
+    /**
+     * 作業が無い周回の metrics flush。間隔に満たなければ何もしない。
+     *
+     * traces は作業が無ければ溜まらないので対象にしない。
+     */
+    private function flushIdleMetrics(): void
+    {
+        if ($this->clock->now() - $this->lastMetricsFlushAt < self::IDLE_METRICS_FLUSH_INTERVAL_NANOS) {
+            return;
+        }
+
+        $this->flushMetrics();
+    }
+
+    /**
+     * metrics を flush し、時刻を記録する。
+     *
+     * 失敗しても時刻は進める。失敗した flush を周回ごとに再試行すると、Looping の頻度で flush と失敗の
+     * 記録が続く。作業が残っている分の再試行は pending 側が受け持つ。
+     * 時刻は flush が終わってから取る。collector に届かず exporter の timeout と retry で間隔を使い切ると、
+     * 次の周回ですぐまた flush することになり、アイドル中の周回が毎回ブロックされる。
+     */
+    private function flushMetrics(): bool
+    {
+        $flushed = $this->forceFlush($this->meterProvider, FailureCounter::SITE_FLUSH_METRICS);
+        $this->lastMetricsFlushAt = $this->clock->now();
+
+        return $flushed;
     }
 
     /**
@@ -216,7 +276,8 @@ class WorkerFlusher
             //     無効化されうる。
             //   - Octane の RequestTerminated は ApplicationGateway が応答後に dispatch する。投げると
             //     Octane worker 側の後処理 (sandbox の破棄) に例外が漏れる。
-            // 作業自体は完了済みなのでロスは無く、pending は落とさないので次の境界で再試行される。
+            // 作業自体は完了済みなのでロスは無く、pending は落とさないので次の境界で再試行される
+            // (アイドル中の metrics の flush は再試行しない。flushMetrics() 参照)。
             // ログは出さない (guard 方針は HttpServerMetrics::terminate() と同じ: Log 自体が throw 源)。
             //
             // かわりに回数だけ counter に積む。ただし **MeterProvider 側の失敗はこの counter でも

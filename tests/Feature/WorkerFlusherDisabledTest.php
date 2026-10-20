@@ -62,8 +62,9 @@ class WorkerFlusherDisabledTest extends TestCase
     {
         $events = app(Dispatcher::class);
 
-        // JobProcessing は QueueMetrics も購読するので、flusher しか購読しないイベントで見る。
-        foreach ([Looping::class, WorkerStopping::class, WorkerFlusher::OCTANE_REQUEST_TERMINATED] as $event) {
+        // JobProcessing / Looping は QueueMetrics も購読するので、flusher しか購読しないイベントで見る
+        // (Looping で flusher が動かないことは下の test_nothing_is_flushed_at_a_job_boundary が押さえる)。
+        foreach ([WorkerStopping::class, WorkerFlusher::OCTANE_REQUEST_TERMINATED] as $event) {
             $this->assertFalse(
                 $events->hasListeners($event),
                 "worker_flusher.enabled=false では {$event} を購読してはいけない。",

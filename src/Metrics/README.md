@@ -139,7 +139,7 @@ aggregates, so it can be incremented on the same hot paths at the cost of one se
 |---|---|---|
 | `laravel.otel_support.stage` | `build` | An instrument could not be created. The instrumentation falls back to a no-op one, so **everything it would have recorded is gone for the rest of the process**. |
 | | `record` | The recording of one event was abandoned. Usually that is a dropped data point; on the queue side it can also be the bookkeeping a later data point needs (`JobProcessing` storing the job's start time), in which case the *duration* of that job is what goes missing. |
-| | `flush` | `forceFlush` at a work boundary failed. The dirty flag survives, so it is retried at the next boundary. |
+| | `flush` | `forceFlush` at a work boundary failed. The dirty flag survives, so it is retried at the next boundary. An idle-time metrics flush is not retried; the next one runs after the interval. |
 | `laravel.otel_support.site` | `metrics.http` | The HTTP middleware (`Http/HttpServerMetrics.php`). |
 | | `metrics.queue` | The queue listeners (`Queue/QueueMetrics.php`). |
 | | `worker_flusher.traces` / `worker_flusher.metrics` | `WorkerFlusher`, per signal — the two are flushed independently so that one failing does not skip the other, and the counter keeps that granularity. |
@@ -237,6 +237,9 @@ the end of the request under FPM, but only the end of the worker's life in a lon
   ("export at the end of the request"). Without it `http.server.request.duration` would sit in the
   meter provider until the worker recycles, and be lost entirely if the worker is SIGKILLed.
 - **Queue worker (the `queue:work` daemon)**: `WorkerFlusher` flushes at job boundaries (`Looping` /
-  `WorkerStopping`).
+  `WorkerStopping`), and flushes metrics once a minute while idle. The queue instruments are created at
+  the first `Looping` rather than at the first job, so that the idle flushes keep their start time
+  recent.
 
-All of it is behind `worker_flusher.enabled`.
+All of the flushing is behind `worker_flusher.enabled`. Creating the queue instruments at the first
+`Looping` is part of the queue instrumentation, so it follows `metrics.queue.enabled` instead.

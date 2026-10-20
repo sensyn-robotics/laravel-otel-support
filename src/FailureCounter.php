@@ -59,7 +59,8 @@ final class FailureCounter
      *
      * - build: instrument を作れなかった (以降その計装は Noop = 記録が丸ごと落ちる)。
      * - record: data point 1 件を捨てた。
-     * - flush: 境界での forceFlush に失敗した (次の境界で再試行される)。
+     * - flush: 境界での forceFlush に失敗した (次の境界で再試行される)。アイドル中の metrics の flush は
+     *   再試行せず、次の間隔で改めて flush する。
      */
     public const STAGE_BUILD = 'build';
 

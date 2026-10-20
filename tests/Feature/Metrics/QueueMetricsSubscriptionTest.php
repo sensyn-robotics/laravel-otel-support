@@ -2,19 +2,29 @@
 
 namespace Sensyn\LaravelOTelSupport\Tests\Feature\Metrics;
 
+use ArrayObject;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Queue\Job;
 use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
+use Illuminate\Queue\Events\Looping;
 use Mockery;
+use OpenTelemetry\API\Common\Time\ClockInterface;
+use OpenTelemetry\API\Common\Time\TestClock;
 use OpenTelemetry\API\Metrics\MeterInterface;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
+use OpenTelemetry\SDK\Metrics\Data\Sum;
+use OpenTelemetry\SDK\Metrics\Data\Temporality;
+use OpenTelemetry\SDK\Metrics\MeterProviderBuilder;
+use OpenTelemetry\SDK\Metrics\MetricExporter\InMemoryExporter;
+use OpenTelemetry\SDK\Metrics\MetricReader\ExportingReader;
 use RuntimeException;
 use Sensyn\LaravelOTelSupport\Metrics\Queue\QueueMetrics;
 use Sensyn\LaravelOTelSupport\Tests\Support\FakeQueuedJob;
 use Sensyn\LaravelOTelSupport\Tests\Support\MakesQueueEvents;
 use Sensyn\LaravelOTelSupport\Tests\Support\RecordsMetrics;
 use Sensyn\LaravelOTelSupport\Tests\TestCase;
+use Sensyn\LaravelOTelSupport\WorkerFlusher;
 
 /**
  * provider が実際に使う購読経路 (QueueMetrics::subscribeLazily) の担保。
@@ -105,6 +115,61 @@ class QueueMetricsSubscriptionTest extends TestCase
         $this->assertArrayHasKey('messaging.client.sent.messages', $this->collectMetrics());
     }
 
+    public function test_instruments_built_at_the_first_loop_get_a_recent_start_after_idling(): void
+    {
+        // SDK は instrument を作った時の start を MeterProvider ごとに 1 回だけ決める。最初のジョブで初めて
+        // instrument を作ると、それまでの WorkerFlusher の idle flush が効かず start が worker の起動まで遡る。
+        $clock = new TestClock;
+        $exporter = new InMemoryExporter(new ArrayObject, Temporality::DELTA);
+        $meterProvider = (new MeterProviderBuilder)
+            ->addReader(new ExportingReader($exporter))
+            ->setClock($clock)
+            ->build();
+        config(['queue.connections.otel-test.driver' => 'redis']);
+        app()->when(QueueMetrics::class)
+            ->needs(MeterProviderInterface::class)
+            ->give(fn (): MeterProviderInterface => $meterProvider);
+        app()->when(WorkerFlusher::class)
+            ->needs(MeterProviderInterface::class)
+            ->give(fn (): MeterProviderInterface => $meterProvider);
+        app()->when(WorkerFlusher::class)
+            ->needs(ClockInterface::class)
+            ->give(fn (): ClockInterface => $clock);
+
+        $job = Mockery::mock(Job::class);
+        $job->shouldReceive('uuid')->andReturn('uuid-1');
+        $job->shouldReceive('payload')->andReturn([]);
+        $job->shouldReceive('getQueue')->andReturn('example-queue');
+        $job->shouldReceive('attempts')->andReturn(1);
+        $job->shouldReceive('resolveName')->andReturn(FakeQueuedJob::class);
+        $job->shouldReceive('isReleased')->andReturn(false);
+        $job->shouldReceive('hasFailed')->andReturn(false);
+
+        $events = app(Dispatcher::class);
+        $this->assertNotFalse($events->until(new Looping('otel-test', 'default')));
+        $this->assertTrue(app()->resolved(QueueMetrics::class));
+
+        $clock->advanceSeconds(60);
+        $events->until(new Looping('otel-test', 'default'));
+        $idleFlushedAt = $clock->now();
+
+        $clock->advanceSeconds(30);
+        $events->dispatch(new JobProcessing('otel-test', $job));
+        $events->dispatch(new JobProcessed('otel-test', $job));
+        $events->until(new Looping('otel-test', 'default'));
+
+        $starts = [];
+        foreach ($exporter->collect(true) as $metric) {
+            if ($metric->name === 'laravel.queue.job.finished') {
+                $this->assertInstanceOf(Sum::class, $metric->data);
+                foreach ($metric->data->dataPoints as $point) {
+                    $starts[] = $point->startTimestamp;
+                }
+            }
+        }
+        $this->assertSame([$idleFlushedAt], $starts);
+    }
+
     public function test_constructor_failure_does_not_propagate_through_the_lazily_resolved_listener(): void
     {
         // 構築は発火時に container が行う (Dispatcher::createClassCallable) ため、失敗はイベントの発火点 =
@@ -130,5 +195,24 @@ class QueueMetricsSubscriptionTest extends TestCase
         // 投げるが、どちらの経路も例外を外に出さないことをここで固定する。
         $this->assertSame(2, $attempts, '発火時解決で constructor が走り getMeter() まで到達している必要がある。');
         $this->assertTrue(app()->resolved(QueueMetrics::class));
+    }
+
+    public function test_constructor_failure_does_not_halt_the_worker_at_the_first_loop(): void
+    {
+        // queue:work では最初の Looping で構築される。Looping は Worker::daemonShouldRun() から until() で
+        // 発火し、囲む try/catch が無いので、漏れると queue:work が異常終了する。
+        $attempts = 0;
+        $meterProvider = Mockery::mock(MeterProviderInterface::class);
+        $meterProvider->shouldReceive('getMeter')->andReturnUsing(function () use (&$attempts): MeterInterface {
+            $attempts++;
+            throw new RuntimeException('meter provider exploded');
+        });
+
+        app()->when(QueueMetrics::class)
+            ->needs(MeterProviderInterface::class)
+            ->give(fn (): MeterProviderInterface => $meterProvider);
+
+        $this->assertNotFalse(app(Dispatcher::class)->until(new Looping('otel-test', 'default')));
+        $this->assertSame(2, $attempts, '発火時解決で constructor が走り getMeter() まで到達している必要がある。');
     }
 }
