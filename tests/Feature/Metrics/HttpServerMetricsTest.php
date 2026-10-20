@@ -3,7 +3,10 @@
 namespace Sensyn\LaravelOTelSupport\Tests\Feature\Metrics;
 
 use Illuminate\Http\Request;
+use Illuminate\Routing\CompiledRouteCollection;
 use Illuminate\Routing\Route;
+use Illuminate\Routing\RouteCollection;
+use Illuminate\Routing\Router;
 use Mockery;
 use OpenTelemetry\API\Metrics\HistogramInterface;
 use OpenTelemetry\API\Metrics\MeterInterface;
@@ -103,6 +106,78 @@ class HttpServerMetricsTest extends TestCase
         $attrs = $this->attributesOf($this->collectMetrics()['http.server.request.duration']);
         $this->assertArrayNotHasKey('http.route', $attrs);
         $this->assertSame(404, $attrs['http.response.status_code']);
+    }
+
+    public function test_automatic_options_route_omits_http_route(): void
+    {
+        $request = Request::create('https://example.test/api/users/5', 'OPTIONS');
+        $route = $this->routesWithoutOptions()->match($request);
+        $this->assertIsAutomaticOptionsRoute($route, 'api/users/5');
+        $request->setRouteResolver(fn () => $route);
+
+        $this->runMiddleware($request, new Response('', 200, ['Allow' => 'GET,HEAD']));
+
+        $this->assertSame([
+            'http.request.method' => 'OPTIONS',
+            'url.scheme' => 'https',
+            'http.response.status_code' => 200,
+            'network.protocol.version' => '1.1',
+        ], $this->attributesOf($this->collectMetrics()['http.server.request.duration']));
+    }
+
+    public function test_automatic_options_route_from_cached_routes_omits_http_route(): void
+    {
+        // route:cache 後の CompiledRouteCollection も同じ getRouteForMethods を通る。
+        $compiled = $this->routesWithoutOptions()->compile();
+        $routes = (new CompiledRouteCollection($compiled['compiled'], $compiled['attributes']))
+            ->setRouter(app(Router::class))
+            ->setContainer(app());
+
+        $request = Request::create('https://example.test/api/users/5', 'OPTIONS');
+        $route = $routes->match($request);
+        $this->assertIsAutomaticOptionsRoute($route, 'api/users/5');
+        $request->setRouteResolver(fn () => $route);
+
+        $this->runMiddleware($request, new Response('', 200));
+
+        $this->assertArrayNotHasKey('http.route', $this->attributesOf($this->collectMetrics()['http.server.request.duration']));
+    }
+
+    public function test_application_defined_options_routes_keep_http_route(): void
+    {
+        // 静的パス (uri と request path が一致) でもアプリが定義した route はテンプレートなので残す。
+        $static = Request::create('https://example.test/api/ping', 'OPTIONS');
+        $static->setRouteResolver(fn () => new Route('OPTIONS', 'api/ping', fn () => 'pong'));
+        $this->runMiddleware($static, new Response('', 200));
+
+        $wildcard = Request::create('https://example.test/api/wild/x', 'OPTIONS');
+        $wildcard->setRouteResolver(fn () => new Route('OPTIONS', 'api/wild/{any}', ['uses' => 'App\Http\Controllers\CorsController@preflight']));
+        $this->runMiddleware($wildcard, new Response('', 200));
+
+        $routes = [];
+        foreach ($this->dataPoints($this->collectMetrics()['http.server.request.duration']) as $point) {
+            $routes[] = $point->attributes->get('http.route');
+        }
+        sort($routes);
+        $this->assertSame(['/api/ping', '/api/wild/{any}'], $routes);
+    }
+
+    private function routesWithoutOptions(): RouteCollection
+    {
+        $routes = new RouteCollection;
+        $routes->add(new Route(['GET', 'HEAD'], 'api/users/{user}', fn () => 'user'));
+
+        return $routes;
+    }
+
+    /**
+     * ルータが raw path を uri にした OPTIONS route を返すことを先に固定する。
+     * framework 側が変わってこれが崩れると、後続の assert は何も再現しないまま通ってしまう。
+     */
+    private function assertIsAutomaticOptionsRoute(Route $route, string $path): void
+    {
+        $this->assertSame(['OPTIONS'], $route->methods());
+        $this->assertSame($path, $route->uri());
     }
 
     public function test_server_error_sets_error_type(): void

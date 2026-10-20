@@ -77,6 +77,10 @@ takes care of merging and publishing the config in one place (`metrics.*` in
       the wrong value so the limit stays visible rather than being mistaken for correct behaviour.
   - `http.server.request.duration`
     - carries `http.route` (the route template) only when routing matched; the raw path is never used.
+      An `OPTIONS` request to a path that has no `OPTIONS` route but does have routes for other methods
+      gets no `http.route` either: Laravel answers it with a route it builds on the fly whose URI is the
+      raw path. A CORS preflight that reaches the router (nothing in front of it, such as Laravel's
+      `HandleCors`, answered it) ends up here unless the application defines an `OPTIONS` route for it.
     - `http.request.method` only ever holds a semconv known method or `_OTHER`, so the number of series
       stays bounded no matter what a client sends. Requests whose method cannot be determined at all (a
       malformed override such as `_method=FOO-BAR` makes Symfony's `getMethod()` throw) are recorded as

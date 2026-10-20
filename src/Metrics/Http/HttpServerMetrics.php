@@ -4,12 +4,14 @@ namespace Sensyn\LaravelOTelSupport\Metrics\Http;
 
 use Closure;
 use Illuminate\Http\Request;
+use Illuminate\Routing\AbstractRouteCollection;
 use Illuminate\Routing\Route;
 use OpenTelemetry\API\Metrics\HistogramInterface;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
 use OpenTelemetry\API\Metrics\Noop\NoopMeter;
 use OpenTelemetry\Context\Context;
 use OpenTelemetry\Context\ContextInterface;
+use ReflectionFunction;
 use Sensyn\LaravelOTelSupport\FailureCounter;
 use Sensyn\LaravelOTelSupport\Metrics\Buckets;
 use Symfony\Component\HttpFoundation\Response;
@@ -161,7 +163,7 @@ class HttpServerMetrics
 
         // http.route はルートがマッチした時のみ。raw path は高カーディナリティなので入れない。
         $route = $request->route();
-        if ($route instanceof Route) {
+        if ($route instanceof Route && ! $this->isAutomaticOptionsRoute($route)) {
             $attrs['http.route'] = '/'.ltrim($route->uri(), '/');
         }
 
@@ -193,6 +195,33 @@ class HttpServerMetrics
             $attrs,
             $context instanceof ContextInterface ? $context : null,
         );
+    }
+
+    /**
+     * OPTIONS route が無いパスへの OPTIONS に対して、ルータがその場で組み立てる Route かどうか
+     * (AbstractRouteCollection::getRouteForMethods。同じパスに他メソッドの route があると Allow ヘッダ付きで 200 を返す)。
+     * その uri は request path そのもの (ID 入り) なので、http.route に入れると raw path と同じ高カーディナリティになる。
+     * HandleCors などが手前で返さずにルータまで届いた CORS preflight は、アプリが OPTIONS route を定義していない限りこれになる。
+     *
+     * uri と request path の一致では見分けない: アプリが定義した静的パスの OPTIONS route も一致してしまう。
+     * 代わりに action closure の定義元クラスで見分ける。Laravel がこの closure をやめた場合は検出が効かなくなるだけで、
+     * http.route に raw path が入る従来の挙動に戻る。
+     */
+    private function isAutomaticOptionsRoute(Route $route): bool
+    {
+        // Laravel が組み立てるのは OPTIONS だけ。closure route 全部に reflection を走らせないための前置き。
+        if ($route->methods() !== ['OPTIONS']) {
+            return false;
+        }
+
+        $uses = $route->getAction('uses');
+        if (! $uses instanceof Closure) {
+            return false;
+        }
+
+        $scope = (new ReflectionFunction($uses))->getClosureScopeClass();
+
+        return $scope !== null && is_a($scope->getName(), AbstractRouteCollection::class, true);
     }
 
     /**
