@@ -5,6 +5,7 @@ namespace Sensyn\LaravelOTelSupport;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Support\ServiceProvider;
+use OpenTelemetry\API\Instrumentation\AutoInstrumentation\ExtensionHookManager;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
 use OpenTelemetry\API\Trace\TracerProviderInterface;
 use Sensyn\LaravelOTelSupport\Metrics\MetricsServiceProvider;
@@ -59,6 +60,12 @@ class OTelSupportServiceProvider extends ServiceProvider
 
         if ($this->app->make(ConfigRepository::class)->get('otel-support.worker_flusher.enabled', true)) {
             $this->registerWorkerFlusher();
+        }
+
+        // 切り離す相手の command span は auto-laravel が ext の hook で開くので、ext が無ければ問題自体が無い。
+        if ($this->app->make(ConfigRepository::class)->get('otel-support.worker_trace_context.enabled', true)
+            && extension_loaded('opentelemetry')) {
+            WorkerTraceContext::registerOnce(new ExtensionHookManager);
         }
     }
 
