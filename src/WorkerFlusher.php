@@ -9,11 +9,7 @@ use Illuminate\Queue\Events\WorkerStopping;
 use OpenTelemetry\API\Common\Time\Clock;
 use OpenTelemetry\API\Common\Time\ClockInterface;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
-use OpenTelemetry\API\Trace\Span;
-use OpenTelemetry\API\Trace\SpanContext;
-use OpenTelemetry\API\Trace\SpanInterface;
 use OpenTelemetry\API\Trace\TracerProviderInterface;
-use OpenTelemetry\Context\Context;
 use Throwable;
 
 /**
@@ -262,22 +258,8 @@ class WorkerFlusher
             //     次の境界で再 flush しても空のキューを流すだけになる。pending が永久に true のまま
             //     以降の全境界で無意味な flush を繰り返す副作用だけが残る。
             // よって「再試行して復旧できる失敗」だけを false にする。それが下の catch (想定外の例外) である。
-            if (! method_exists($provider, 'forceFlush')) {
-                return true;
-            }
-
-            // export の HTTP 送信 (OTLP exporter の PSR-18 client) は psr18 等の自動計装が span にする。
-            // metrics の ExportingReader は forceFlush を呼んだ context のまま export するので、送信の span は
-            // current context の span の子になる。queue:work では auto-laravel の `Command queue:work` span が
-            // プロセス終了まで閉じないので、送信の span が 1 本の trace に積まれ続け、backend の trace サイズ
-            // 上限を超えた後は捨てられる。flush の間は sampled でない親を置き、parentbased sampler に
-            // この間の span を記録させない。
-            // traces の BatchSpanProcessor は構築時に保存した context に切り替えて export するので、ここは効かない。
-            $scope = Context::getCurrent()->withContextValue(self::unsampledSpan())->activate();
-            try {
+            if (method_exists($provider, 'forceFlush')) {
                 $provider->forceFlush();
-            } finally {
-                $scope->detach();
             }
 
             return true;
@@ -305,16 +287,5 @@ class WorkerFlusher
 
             return false;
         }
-    }
-
-    /**
-     * sampled フラグを持たない span。
-     *
-     * ID は valid でなければならない。invalid な SpanContext は parentbased sampler に「親なし」と扱われ、
-     * root 用の sampler (既定は always_on) で記録される。ID は export されないので値は何でもよい。
-     */
-    private static function unsampledSpan(): SpanInterface
-    {
-        return Span::wrap(SpanContext::create(bin2hex(random_bytes(16)), bin2hex(random_bytes(8))));
     }
 }

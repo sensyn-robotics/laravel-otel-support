@@ -231,10 +231,7 @@ exporter and the auto-instrumentation (`open-telemetry/sdk`, `open-telemetry/exp
   processes — queue-worker jobs (`Looping` / `WorkerStopping`) and Octane requests
   (`RequestTerminated`, subscribed by class name so that `laravel/octane` stays out of the dependency
   list). The class docblock explains why those flush points were chosen and why the class sits directly
-  under the umbrella rather than in a submodule. The flush runs under an unsampled parent, so the
-  metrics exporter's own HTTP requests are not recorded as spans; this relies on a parent-based sampler
-  (the SDK default). It does not reach span exports, which `BatchSpanProcessor` runs under the context
-  it saved when it was built.
+  under the umbrella rather than in a submodule.
 - `src/WorkerTraceContext.php`: attaches the root context at a queue worker's first `Looping` and
   detaches it at `WorkerStopping`, so that spans without a parent of their own (the receive span of
   each job, for example) start their own trace instead of joining the never-ending `Command queue:work`
