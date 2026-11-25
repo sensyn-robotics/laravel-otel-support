@@ -9,6 +9,7 @@ use OpenTelemetry\API\Instrumentation\AutoInstrumentation\HookManagerInterface;
 use OpenTelemetry\API\Trace\SpanInterface;
 use OpenTelemetry\Context\Context;
 use OpenTelemetry\Context\ContextStorageInterface;
+use OpenTelemetry\Context\ContextStorageScopeInterface;
 use OpenTelemetry\Context\ExecutionContextAwareInterface;
 use OpenTelemetry\Context\ScopeInterface;
 use OpenTelemetry\SDK\Trace\TracerProvider;
@@ -111,7 +112,7 @@ class WorkerTraceContextTest extends TestCase
         ($this->post)();
     }
 
-    public function test_a_failing_detach_does_not_reach_the_worker(): void
+    public function test_a_failing_scope_lookup_does_not_reach_the_worker(): void
     {
         ($this->pre)();
         $storage = Mockery::mock(ContextStorageInterface::class.', '.ExecutionContextAwareInterface::class);
@@ -121,6 +122,22 @@ class WorkerTraceContextTest extends TestCase
         ($this->post)();
 
         $this->addToAssertionCount(1);
+    }
+
+    public function test_a_failing_detach_does_not_reach_the_worker(): void
+    {
+        // enter() が attach した scope を、leave() が一番上に見つけて detach() する所で投げさせる。
+        $scope = Mockery::mock(ContextStorageScopeInterface::class);
+        $scope->shouldReceive('detach')->once()->andThrow(new RuntimeException('detach exploded'));
+        $current = Context::getCurrent();
+        $storage = Mockery::mock(ContextStorageInterface::class.', '.ExecutionContextAwareInterface::class);
+        $storage->shouldReceive('current')->andReturn($current);
+        $storage->shouldReceive('attach')->once()->andReturn($scope);
+        $storage->shouldReceive('scope')->andReturn($scope);
+        Context::setStorage($storage);
+
+        ($this->pre)();
+        ($this->post)();
     }
 
     public function test_context_values_other_than_the_span_are_kept_inside_the_daemon(): void
