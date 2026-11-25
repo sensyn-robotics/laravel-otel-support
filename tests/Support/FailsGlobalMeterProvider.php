@@ -43,8 +43,9 @@ trait FailsGlobalMeterProvider
         // 1. 未初期化に戻す。初期化済みだと meterProvider() はキャッシュを返すだけで initializer を通らない。
         $globals->setValue(null, null);
 
-        // 2. Configurator を返さない initializer。
-        Globals::registerInitializer(static fn (Configurator $configurator): mixed => null);
+        // 2. Configurator を返さない initializer。registerInitializer() は api 1.12 から引数の型が PHPDoc で
+        //    Closure(Configurator): Configurator になり、わざと違反する closure を渡せないので reflection で積む。
+        $initializers->setValue(null, [static fn (Configurator $configurator): mixed => null]);
 
         try {
             $this->assertGlobalMeterProviderThrows();
