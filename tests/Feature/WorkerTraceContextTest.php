@@ -12,6 +12,7 @@ use OpenTelemetry\Context\ContextStorageInterface;
 use OpenTelemetry\Context\ExecutionContextAwareInterface;
 use OpenTelemetry\Context\ScopeInterface;
 use OpenTelemetry\SDK\Trace\TracerProvider;
+use ReflectionProperty;
 use RuntimeException;
 use Sensyn\LaravelOTelSupport\Tests\TestCase;
 use Sensyn\LaravelOTelSupport\WorkerTraceContext;
@@ -118,5 +119,41 @@ class WorkerTraceContextTest extends TestCase
         ($this->post)();
 
         $this->addToAssertionCount(1);
+    }
+
+    public function test_context_values_other_than_the_span_are_kept_inside_the_daemon(): void
+    {
+        $key = Context::createKey('app-value');
+        Context::storage()->attach(Context::getCurrent()->with($key, 'kept'));
+
+        ($this->pre)();
+
+        $this->assertSame('kept', Context::getCurrent()->get($key));
+    }
+
+    public function test_register_once_hooks_only_once_per_process(): void
+    {
+        $this->resetRegistered();
+        $hooks = Mockery::mock(HookManagerInterface::class);
+        $hooks->shouldReceive('hook')->once();
+
+        WorkerTraceContext::registerOnce($hooks);
+        WorkerTraceContext::registerOnce($hooks);
+    }
+
+    public function test_a_failing_hook_registration_does_not_reach_the_application(): void
+    {
+        $this->resetRegistered();
+        $hooks = Mockery::mock(HookManagerInterface::class);
+        $hooks->shouldReceive('hook')->once()->andThrow(new RuntimeException('hook exploded'));
+
+        WorkerTraceContext::registerOnce($hooks);
+
+        $this->addToAssertionCount(1);
+    }
+
+    private function resetRegistered(): void
+    {
+        (new ReflectionProperty(WorkerTraceContext::class, 'registered'))->setValue(null, false);
     }
 }
