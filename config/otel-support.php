@@ -61,4 +61,18 @@ return [
         */
         'enabled' => env('OTEL_WORKER_FLUSH_ENABLED', true),
     ],
+
+    'worker_trace_context' => [
+        /*
+        |----------------------------------------------------------------------
+        | queue worker の span を command span から切り離す
+        |----------------------------------------------------------------------
+        |
+        | auto-laravel は queue:work の command span をプロセス終了まで閉じないので、自前の親を持たない
+        | span (ジョブの receive span 等) がすべてその子になり、1 本の trace が伸び続ける。true にすると
+        | worker の最初のループで root context に切り替え、以降の span を独立した trace にする。
+        |
+        */
+        'enabled' => env('OTEL_WORKER_TRACE_CONTEXT_ENABLED', true),
+    ],
 ];

@@ -60,6 +60,11 @@ class OTelSupportServiceProvider extends ServiceProvider
         if ($this->app->make(ConfigRepository::class)->get('otel-support.worker_flusher.enabled', true)) {
             $this->registerWorkerFlusher();
         }
+
+        if ($this->app->make(ConfigRepository::class)->get('otel-support.worker_trace_context.enabled', true)) {
+            // 依存を持たず Globals にも触らないので、遅延解決せずにその場で作って購読する。
+            (new WorkerTraceContext)->subscribe($this->app->make(Dispatcher::class));
+        }
     }
 
     private function registerWorkerFlusher(): void

@@ -112,6 +112,7 @@ php artisan vendor:publish --tag=otel-support-config
 | `metrics.queue.enabled` | – | `true` | Queue metrics instrumentation on/off |
 | `metrics.queue.duration_buckets` | `OTEL_METRICS_QUEUE_DURATION_BUCKETS` | semconv recommendation | Bucket boundaries of the job duration histogram (seconds, comma-separated) |
 | `worker_flusher.enabled` | `OTEL_WORKER_FLUSH_ENABLED` | `true` | `forceFlush` at the work boundaries of long-lived processes (queue-worker jobs, Octane requests), plus a once-a-minute metrics flush while a queue worker is idle, on/off |
+| `worker_trace_context.enabled` | `OTEL_WORKER_TRACE_CONTEXT_ENABLED` | `true` | Detach a `queue:work` daemon's spans from the `Command queue:work` span, which auto-laravel keeps open for the life of the process, so that they do not pile up in one ever-growing trace |
 
 Bucket lists may be unordered and contain duplicates (they are sorted and de-duplicated), and invalid
 values (empty, non-numeric) fall back to the default.
@@ -221,8 +222,8 @@ exporter and the auto-instrumentation (`open-telemetry/sdk`, `open-telemetry/exp
 
 - `src/OTelSupportServiceProvider.php`: umbrella provider. Merges and publishes the config once,
   registers the submodule providers and wires `WorkerFlusher`.
-- `config/otel-support.php`: config shared by the submodules (key `otel-support`), with `metrics.*` and
-  `worker_flusher.*` nested underneath.
+- `config/otel-support.php`: config shared by the submodules (key `otel-support`), with `metrics.*`,
+  `worker_flusher.*` and `worker_trace_context.*` nested underneath.
 - `src/Metrics/`: HTTP and queue metrics instrumentation. See
   [src/Metrics/README.md](src/Metrics/README.md) for the recorded metrics, their attributes and the
   naming rationale.
@@ -230,7 +231,13 @@ exporter and the auto-instrumentation (`open-telemetry/sdk`, `open-telemetry/exp
   processes — queue-worker jobs (`Looping` / `WorkerStopping`) and Octane requests
   (`RequestTerminated`, subscribed by class name so that `laravel/octane` stays out of the dependency
   list). The class docblock explains why those flush points were chosen and why the class sits directly
-  under the umbrella rather than in a submodule.
+  under the umbrella rather than in a submodule. The flush runs under an unsampled parent, so the
+  exporter's own HTTP requests are not recorded as spans; this relies on a parent-based sampler (the
+  SDK default).
+- `src/WorkerTraceContext.php`: attaches the root context at a queue worker's first `Looping` and
+  detaches it at `WorkerStopping`, so that spans without a parent of their own (the receive span of
+  each job, for example) start their own trace instead of joining the never-ending `Command queue:work`
+  span.
 - `src/SafeGlobals.php`: resolves the global tracer / meter provider and falls back to the API's Noop
   providers if `Globals` throws. Both providers inject through it, which is what keeps a telemetry
   misconfiguration out of the application's own code paths.
