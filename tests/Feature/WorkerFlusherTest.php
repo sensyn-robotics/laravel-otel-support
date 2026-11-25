@@ -3,6 +3,7 @@
 namespace Sensyn\LaravelOTelSupport\Tests\Feature;
 
 use ArrayObject;
+use Closure;
 use Illuminate\Contracts\Queue\Job;
 use Illuminate\Events\Dispatcher;
 use Illuminate\Queue\Events\JobProcessing;
@@ -14,12 +15,15 @@ use OpenTelemetry\API\Common\Time\TestClock;
 use OpenTelemetry\API\Metrics\Noop\NoopMeterProvider;
 use OpenTelemetry\API\Trace\NoopTracerProvider;
 use OpenTelemetry\Context\Context;
+use OpenTelemetry\SDK\Metrics\AggregationTemporalitySelectorInterface;
 use OpenTelemetry\SDK\Metrics\Data\Sum;
 use OpenTelemetry\SDK\Metrics\Data\Temporality;
 use OpenTelemetry\SDK\Metrics\MeterProviderBuilder;
 use OpenTelemetry\SDK\Metrics\MeterProviderInterface;
 use OpenTelemetry\SDK\Metrics\MetricExporter\InMemoryExporter as MetricInMemoryExporter;
+use OpenTelemetry\SDK\Metrics\MetricMetadataInterface;
 use OpenTelemetry\SDK\Metrics\MetricReader\ExportingReader;
+use OpenTelemetry\SDK\Metrics\PushMetricExporterInterface;
 use OpenTelemetry\SDK\Trace\SpanExporter\InMemoryExporter;
 use OpenTelemetry\SDK\Trace\SpanProcessor\BatchSpanProcessor;
 use OpenTelemetry\SDK\Trace\TracerProvider;
@@ -481,24 +485,50 @@ class WorkerFlusherTest extends TestCase
         $this->assertSame(2, $attempts);
     }
 
-    public function test_spans_started_during_a_flush_are_not_recorded(): void
+    public function test_spans_started_during_a_metrics_export_are_not_recorded(): void
     {
-        // OTLP exporter の HTTP 送信は psr18 等の計装が span にする。forceFlush の中で span を作り、
-        // parentbased sampler (SDK 既定) がそれを記録しないことを見る。
-        $recording = null;
-        $tracerProvider = Mockery::mock(SdkTracerProvider::class);
-        $tracerProvider->shouldReceive('forceFlush')->andReturnUsing(function () use (&$recording): bool {
-            $recording = $this->tracerProvider->getTracer('test')->spanBuilder('POST')->startSpan()->isRecording();
+        // OTLP exporter の HTTP 送信は psr18 等の計装が span にする。ExportingReader は forceFlush を呼んだ
+        // context のまま export するので、export の中で作った span を parentbased sampler (SDK 既定) が
+        // 記録しないことを、実際の MeterProvider と reader を通して見る。
+        // reader は temporality を返さない exporter には collect せず、push 型でない exporter には forceFlush で export しない。
+        $exporter = new class(fn (): bool => $this->tracerProvider->getTracer('test')->spanBuilder('POST')->startSpan()->isRecording()) implements AggregationTemporalitySelectorInterface, PushMetricExporterInterface
+        {
+            public ?bool $recording = null;
 
-            return true;
-        });
+            /** @param  Closure(): bool  $startSpan */
+            public function __construct(private Closure $startSpan) {}
+
+            public function temporality(MetricMetadataInterface $metric): string
+            {
+                return Temporality::DELTA;
+            }
+
+            public function export(iterable $batch): bool
+            {
+                $this->recording = ($this->startSpan)();
+
+                return true;
+            }
+
+            public function shutdown(): bool
+            {
+                return true;
+            }
+
+            public function forceFlush(): bool
+            {
+                return true;
+            }
+        };
+        $meterProvider = (new MeterProviderBuilder)->addReader(new ExportingReader($exporter))->build();
+        $meterProvider->getMeter('test')->createCounter('jobs')->add(1);
         $dispatcher = new Dispatcher;
-        (new WorkerFlusher($tracerProvider, $this->meterProvider))->subscribe($dispatcher);
+        (new WorkerFlusher($this->tracerProvider, $meterProvider))->subscribe($dispatcher);
 
         $dispatcher->dispatch(new JobProcessing('redis', Mockery::mock(Job::class)));
         $dispatcher->until(new Looping('redis', 'default'));
 
-        $this->assertFalse($recording);
+        $this->assertFalse($exporter->recording);
         // flush の外では従来どおり記録される。
         $this->assertTrue($this->tracerProvider->getTracer('test')->spanBuilder('job-span')->startSpan()->isRecording());
     }

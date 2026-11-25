@@ -16,7 +16,8 @@ use Throwable;
  * attach する (OTEL_PHP_TRACE_CLI_ENABLED に依らない)。queue:work ではこの span がプロセス終了まで閉じないので、
  * 自前の親を持たない span (getNextJob の receive span、export の HTTP 送信など) がすべてその子になり、
  * 1 本の trace がプロセスの寿命だけ伸び続ける。backend の trace サイズ上限を超えると以降の span は捨てられる。
- * ジョブの process span は payload から親を取るので元から影響を受けない。
+ * ジョブの process span は payload に trace context があればそこから親を取るが、無いジョブ (span の無い所から
+ * dispatch したもの) は current context を親にするので、これも command span の下に入っていた。
  *
  * 最初の Looping で root context を attach し、以降の span を独立した trace にする。WorkerStopping で外し、
  * command span は従来どおり command の終了時に閉じる。

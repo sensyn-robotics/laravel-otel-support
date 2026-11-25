@@ -267,10 +267,12 @@ class WorkerFlusher
             }
 
             // export の HTTP 送信 (OTLP exporter の PSR-18 client) は psr18 等の自動計装が span にする。
-            // そのまま flush すると、送信のたびに span が 1 本でき、current context の span の子になる。
-            // queue:work では auto-laravel の `Command queue:work` span がプロセス終了まで閉じないので、
-            // 送信の span が 1 本の trace に積まれ続け、backend の trace サイズ上限を超えた後は捨てられる。
-            // flush の間は sampled でない親を置き、parentbased sampler にこの間の span を記録させない。
+            // metrics の ExportingReader は forceFlush を呼んだ context のまま export するので、送信の span は
+            // current context の span の子になる。queue:work では auto-laravel の `Command queue:work` span が
+            // プロセス終了まで閉じないので、送信の span が 1 本の trace に積まれ続け、backend の trace サイズ
+            // 上限を超えた後は捨てられる。flush の間は sampled でない親を置き、parentbased sampler に
+            // この間の span を記録させない。
+            // traces の BatchSpanProcessor は構築時に保存した context に切り替えて export するので、ここは効かない。
             $scope = Context::getCurrent()->withContextValue(self::unsampledSpan())->activate();
             try {
                 $provider->forceFlush();
