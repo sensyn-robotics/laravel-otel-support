@@ -40,8 +40,6 @@ class WorkerFlusherDisabledTest extends TestCase
         parent::defineEnvironment($app);
 
         $app['config']->set('otel-support.worker_flusher.enabled', false);
-        // WorkerStopping は WorkerTraceContext も購読するので、listener の有無で見るために止めておく。
-        $app['config']->set('otel-support.worker_trace_context.enabled', false);
     }
 
     protected function setUp(): void

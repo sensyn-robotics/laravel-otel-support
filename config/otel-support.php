@@ -70,7 +70,8 @@ return [
         |
         | auto-laravel は queue:work の command span をプロセス終了まで閉じないので、自前の親を持たない
         | span (ジョブの receive span 等) がすべてその子になり、1 本の trace が伸び続ける。true にすると
-        | worker の最初のループで root context に切り替え、以降の span を独立した trace にする。
+        | worker のループ (Worker::daemon) の間だけ root context に切り替え、その間の span を独立した trace に
+        | する。ext-opentelemetry の hook を使うので、ext が無い環境では何もしない。
         |
         */
         'enabled' => env('OTEL_WORKER_TRACE_CONTEXT_ENABLED', true),

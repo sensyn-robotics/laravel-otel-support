@@ -5,9 +5,11 @@ namespace Sensyn\LaravelOTelSupport;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Support\ServiceProvider;
+use OpenTelemetry\API\Instrumentation\AutoInstrumentation\ExtensionHookManager;
 use OpenTelemetry\API\Metrics\MeterProviderInterface;
 use OpenTelemetry\API\Trace\TracerProviderInterface;
 use Sensyn\LaravelOTelSupport\Metrics\MetricsServiceProvider;
+use Throwable;
 
 /**
  * OTel 補完計装 (auto-laravel + SDK autoload の穴埋め) をまとめる umbrella provider。
@@ -62,8 +64,27 @@ class OTelSupportServiceProvider extends ServiceProvider
         }
 
         if ($this->app->make(ConfigRepository::class)->get('otel-support.worker_trace_context.enabled', true)) {
-            // 依存を持たず Globals にも触らないので、遅延解決せずにその場で作って購読する。
-            (new WorkerTraceContext)->subscribe($this->app->make(Dispatcher::class));
+            self::registerWorkerTraceContext();
+        }
+    }
+
+    /** ext の hook はプロセスに残るので、app を作り直しても (テスト等) 1 回だけ掛ける。 */
+    private static bool $workerTraceContextRegistered = false;
+
+    private static function registerWorkerTraceContext(): void
+    {
+        // 切り離す相手の command span は auto-laravel が ext の hook で開くので、ext が無ければ問題自体が無い。
+        if (self::$workerTraceContextRegistered || ! extension_loaded('opentelemetry')) {
+            return;
+        }
+
+        self::$workerTraceContextRegistered = true;
+
+        try {
+            (new WorkerTraceContext)->register(new ExtensionHookManager);
+        } catch (Throwable) {
+            // 失敗は数えない。掛けられなかった時は span が command span の下に積まれる従来の形に戻るだけで、
+            // telemetry は欠けない。provider の boot はアプリの起動経路なので外には漏らさない。
         }
     }
 

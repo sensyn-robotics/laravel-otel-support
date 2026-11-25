@@ -2,9 +2,8 @@
 
 namespace Sensyn\LaravelOTelSupport;
 
-use Illuminate\Contracts\Events\Dispatcher;
-use Illuminate\Queue\Events\Looping;
-use Illuminate\Queue\Events\WorkerStopping;
+use Illuminate\Queue\Worker;
+use OpenTelemetry\API\Instrumentation\AutoInstrumentation\HookManagerInterface;
 use OpenTelemetry\Context\Context;
 use OpenTelemetry\Context\ScopeInterface;
 use Throwable;
@@ -19,48 +18,56 @@ use Throwable;
  * ジョブの process span は payload に trace context があればそこから親を取るが、無いジョブ (span の無い所から
  * dispatch したもの) は current context を親にするので、これも command span の下に入っていた。
  *
- * 最初の Looping で root context を attach し、以降の span を独立した trace にする。WorkerStopping で外し、
- * command span は従来どおり command の終了時に閉じる。
+ * Worker::daemon の実行中だけ root context を attach し、その間の span を独立した trace にする。境界は
+ * ext-opentelemetry の hook で取る。post hook は例外で抜けた時も走るので、command span は従来どおり command の
+ * 終了時に閉じる。auto-laravel 自体が ext-opentelemetry を要るので、ext が無い環境ではこの問題も起きない。
  *
  * @internal OTelSupportServiceProvider が配線する。消費側アプリ向けの API ではない。
  */
 class WorkerTraceContext
 {
-    private ?ScopeInterface $scope = null;
+    /**
+     * daemon ごとに attach した scope (attach に失敗した回は null)。pre と post の対応を stack で持つ。
+     *
+     * @var list<ScopeInterface|null>
+     */
+    private array $scopes = [];
 
-    public function subscribe(Dispatcher $events): void
+    public function register(HookManagerInterface $hooks): void
     {
-        $events->listen(Looping::class, [$this, 'detachFromCommand']);
-        $events->listen(WorkerStopping::class, [$this, 'restore']);
+        $hooks->hook(
+            Worker::class,
+            'daemon',
+            function (): void {
+                $this->enter();
+            },
+            function (): void {
+                $this->leave();
+            },
+        );
     }
 
-    /**
-     * Looping はループ先頭で発火するので、ジョブの span の scope は外れていて、上に残っているのは command 側だけ。
-     */
-    public function detachFromCommand(): void
+    public function enter(): void
     {
-        if ($this->scope !== null) {
-            return;
-        }
-
         try {
-            $this->scope = Context::storage()->attach(Context::getRoot());
+            $this->scopes[] = Context::storage()->attach(Context::getRoot());
         } catch (Throwable) {
             // 失敗は数えない。切り離せなかった時は span が command span の下に積まれる従来の形に戻るだけで、
-            // telemetry は欠けない。listener は worker のループ上にあるので外には漏らさない。
+            // telemetry は欠けない。hook は worker の起動経路上にあるので外には漏らさない。
+            $this->scopes[] = null;
         }
     }
 
     /**
      * 自分の scope が一番上にある時だけ外す。
      *
-     * WorkerStopping は job timeout (Worker::kill) からも発火し、その時はジョブの span の scope が上にある。
-     * 順序を崩して外すとジョブ側の span の終了処理が別の scope を外すことになる。kill はこの直後にプロセスを
-     * 終えるので、外さずに置いておいてよい。
+     * daemon の中で開いた span の scope は、それぞれの post hook が先に外しているはずなので、通常は一番上にある。
+     * ジョブ側のコードが scope を外し忘れていた場合は、順序を崩して外すと後の command span の終了処理が別の
+     * scope を外すことになるので、触らない。
      */
-    public function restore(): void
+    public function leave(): void
     {
-        $scope = $this->scope;
+        $scope = array_pop($this->scopes);
         if ($scope === null) {
             return;
         }
@@ -68,11 +75,10 @@ class WorkerTraceContext
         try {
             if (Context::storage()->scope() === $scope) {
                 $scope->detach();
-                $this->scope = null;
             }
         } catch (Throwable) {
             // 失敗は数えない。外せなかった時に起きるのは command span が閉じないことだけで、今回の変更前の
-            // queue:work でも SIGKILL で終われば同じ。listener は worker の停止処理上にあるので外には漏らさない。
+            // queue:work でも SIGKILL で終われば同じ。hook は worker の停止経路上にあるので外には漏らさない。
         }
     }
 }

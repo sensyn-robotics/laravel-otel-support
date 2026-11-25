@@ -232,10 +232,11 @@ exporter and the auto-instrumentation (`open-telemetry/sdk`, `open-telemetry/exp
   (`RequestTerminated`, subscribed by class name so that `laravel/octane` stays out of the dependency
   list). The class docblock explains why those flush points were chosen and why the class sits directly
   under the umbrella rather than in a submodule.
-- `src/WorkerTraceContext.php`: attaches the root context at a queue worker's first `Looping` and
-  detaches it at `WorkerStopping`, so that spans without a parent of their own (the receive span of
-  each job, for example) start their own trace instead of joining the never-ending `Command queue:work`
-  span.
+- `src/WorkerTraceContext.php`: hooks `Illuminate\Queue\Worker::daemon` through ext-opentelemetry and
+  attaches the root context for the duration of the call, so that spans without a parent of their own
+  (the receive span of each job, for example) start their own trace instead of joining the
+  never-ending `Command queue:work` span. The post hook also runs when `daemon()` throws. Without the
+  extension it does nothing, as auto-laravel, which opens that span, needs the extension too.
 - `src/SafeGlobals.php`: resolves the global tracer / meter provider and falls back to the API's Noop
   providers if `Globals` throws. Both providers inject through it, which is what keeps a telemetry
   misconfiguration out of the application's own code paths.

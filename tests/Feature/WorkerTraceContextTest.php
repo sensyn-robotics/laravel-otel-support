@@ -2,11 +2,10 @@
 
 namespace Sensyn\LaravelOTelSupport\Tests\Feature;
 
-use Illuminate\Contracts\Events\Dispatcher as DispatcherContract;
-use Illuminate\Events\Dispatcher;
-use Illuminate\Queue\Events\Looping;
-use Illuminate\Queue\Events\WorkerStopping;
+use Closure;
+use Illuminate\Queue\Worker;
 use Mockery;
+use OpenTelemetry\API\Instrumentation\AutoInstrumentation\HookManagerInterface;
 use OpenTelemetry\API\Trace\SpanInterface;
 use OpenTelemetry\Context\Context;
 use OpenTelemetry\Context\ContextStorageInterface;
@@ -19,6 +18,9 @@ use Sensyn\LaravelOTelSupport\WorkerTraceContext;
 
 /**
  * auto-laravel の Command hook と同じく、command span を Context::storage()->attach() で載せた状態から始める。
+ *
+ * テスト環境には ext-opentelemetry が無いので、Worker::daemon の pre / post hook は register() に渡す
+ * HookManager で受け取って直接呼ぶ。
  */
 class WorkerTraceContextTest extends TestCase
 {
@@ -28,6 +30,10 @@ class WorkerTraceContextTest extends TestCase
 
     private ScopeInterface $commandScope;
 
+    private Closure $pre;
+
+    private Closure $post;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -35,14 +41,16 @@ class WorkerTraceContextTest extends TestCase
         $this->tracerProvider = new TracerProvider;
         $this->commandSpan = $this->tracerProvider->getTracer('test')->spanBuilder('Command queue:work')->startSpan();
         $this->commandScope = Context::storage()->attach($this->commandSpan->storeInContext(Context::getCurrent()));
-    }
 
-    private function subscribedDispatcher(): Dispatcher
-    {
-        $dispatcher = new Dispatcher;
-        (new WorkerTraceContext)->subscribe($dispatcher);
-
-        return $dispatcher;
+        $hooks = Mockery::mock(HookManagerInterface::class);
+        $hooks->shouldReceive('hook')
+            ->once()
+            ->with(Worker::class, 'daemon', Mockery::type(Closure::class), Mockery::type(Closure::class))
+            ->andReturnUsing(function (?string $class, string $function, Closure $pre, Closure $post): void {
+                $this->pre = $pre;
+                $this->post = $post;
+            });
+        (new WorkerTraceContext)->register($hooks);
     }
 
     private function startSpan(): SpanInterface
@@ -50,89 +58,64 @@ class WorkerTraceContextTest extends TestCase
         return $this->tracerProvider->getTracer('test')->spanBuilder('receive')->startSpan();
     }
 
-    public function test_spans_join_the_command_span_before_the_first_loop(): void
+    private function joinsCommandTrace(SpanInterface $span): bool
+    {
+        return $span->getContext()->getTraceId() === $this->commandSpan->getContext()->getTraceId();
+    }
+
+    public function test_spans_join_the_command_span_outside_the_daemon(): void
     {
         // 前提の確認: 切り離す前は command span の trace に入る。
-        $this->assertSame($this->commandSpan->getContext()->getTraceId(), $this->startSpan()->getContext()->getTraceId());
+        $this->assertTrue($this->joinsCommandTrace($this->startSpan()));
     }
 
-    public function test_spans_start_their_own_trace_after_the_first_loop(): void
+    public function test_spans_start_their_own_trace_inside_the_daemon(): void
     {
-        $dispatcher = $this->subscribedDispatcher();
+        ($this->pre)();
 
-        $this->assertNotFalse($dispatcher->until(new Looping('redis', 'default')));
-
-        $this->assertNotSame($this->commandSpan->getContext()->getTraceId(), $this->startSpan()->getContext()->getTraceId());
+        $this->assertFalse($this->joinsCommandTrace($this->startSpan()));
     }
 
-    public function test_later_loops_do_not_stack_scopes(): void
+    public function test_leaving_the_daemon_restores_the_command_span(): void
     {
-        $dispatcher = $this->subscribedDispatcher();
+        ($this->pre)();
+        ($this->post)();
 
-        $dispatcher->until(new Looping('redis', 'default'));
-        $dispatcher->until(new Looping('redis', 'default'));
-        $dispatcher->dispatch(new WorkerStopping);
-
-        // 1 回の WorkerStopping で command span の scope に戻る = attach は 1 回だけ。
+        // daemon が例外で抜けた時も ext の post hook は走る。auto-laravel の post hook は
+        // Context::storage()->scope() を外して command span を閉じるので、ここに command span が戻っている必要がある。
         $this->assertSame($this->commandScope, Context::storage()->scope());
     }
 
-    public function test_worker_stopping_restores_the_command_span(): void
+    public function test_a_leaked_job_scope_on_top_is_left_alone(): void
     {
-        $dispatcher = $this->subscribedDispatcher();
-
-        $dispatcher->until(new Looping('redis', 'default'));
-        $dispatcher->dispatch(new WorkerStopping);
-
-        // auto-laravel の post hook は Context::storage()->scope() を外して command span を閉じる。
-        $this->assertSame($this->commandScope, Context::storage()->scope());
-    }
-
-    public function test_worker_stopping_leaves_a_job_scope_on_top_alone(): void
-    {
-        $dispatcher = $this->subscribedDispatcher();
-
-        $dispatcher->until(new Looping('redis', 'default'));
-        // job timeout (Worker::kill) ではジョブの span の scope が上にある状態で WorkerStopping が来る。
+        ($this->pre)();
         $jobScope = Context::storage()->attach($this->startSpan()->storeInContext(Context::getCurrent()));
-        $dispatcher->dispatch(new WorkerStopping);
+        ($this->post)();
 
         $this->assertSame($jobScope, Context::storage()->scope());
     }
 
-    public function test_worker_stopping_without_a_loop_does_nothing(): void
-    {
-        $this->subscribedDispatcher()->dispatch(new WorkerStopping);
-
-        $this->assertSame($this->commandScope, Context::storage()->scope());
-    }
-
-    public function test_the_provider_subscribes_it_by_default(): void
-    {
-        app(DispatcherContract::class)->until(new Looping('redis', 'default'));
-
-        $this->assertNotSame($this->commandSpan->getContext()->getTraceId(), $this->startSpan()->getContext()->getTraceId());
-    }
-
     public function test_a_failing_attach_does_not_reach_the_worker(): void
     {
-        $dispatcher = $this->subscribedDispatcher();
         $storage = Mockery::mock(ContextStorageInterface::class.', '.ExecutionContextAwareInterface::class);
         $storage->shouldReceive('attach')->andThrow(new RuntimeException('attach exploded'));
         Context::setStorage($storage);
 
-        $this->assertNotFalse($dispatcher->until(new Looping('redis', 'default')));
+        ($this->pre)();
+        // attach に失敗した回の post は何もしない (storage に触らない)。
+        ($this->post)();
+
+        $this->addToAssertionCount(1);
     }
 
     public function test_a_failing_detach_does_not_reach_the_worker(): void
     {
-        $dispatcher = $this->subscribedDispatcher();
-        $dispatcher->until(new Looping('redis', 'default'));
+        ($this->pre)();
         $storage = Mockery::mock(ContextStorageInterface::class.', '.ExecutionContextAwareInterface::class);
         $storage->shouldReceive('scope')->andThrow(new RuntimeException('scope exploded'));
         Context::setStorage($storage);
 
-        $dispatcher->dispatch(new WorkerStopping);
+        ($this->post)();
 
         $this->addToAssertionCount(1);
     }
