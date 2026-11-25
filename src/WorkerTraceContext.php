@@ -39,7 +39,7 @@ class WorkerTraceContext
     private array $scopes = [];
 
     /**
-     * プロセスで 1 回だけ hook を掛ける。有効かどうかは最初に呼んだ時点の設定で決まる。
+     * プロセスで 1 回だけ hook を掛ける。ext の hook は外せないので、一度掛けたら後の app で無効にしても残る。
      */
     public static function registerOnce(HookManagerInterface $hooks): void
     {

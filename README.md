@@ -112,7 +112,7 @@ php artisan vendor:publish --tag=otel-support-config
 | `metrics.queue.enabled` | – | `true` | Queue metrics instrumentation on/off |
 | `metrics.queue.duration_buckets` | `OTEL_METRICS_QUEUE_DURATION_BUCKETS` | semconv recommendation | Bucket boundaries of the job duration histogram (seconds, comma-separated) |
 | `worker_flusher.enabled` | `OTEL_WORKER_FLUSH_ENABLED` | `true` | `forceFlush` at the work boundaries of long-lived processes (queue-worker jobs, Octane requests), plus a once-a-minute metrics flush while a queue worker is idle, on/off |
-| `worker_trace_context.enabled` | `OTEL_WORKER_TRACE_CONTEXT_ENABLED` | `true` | Detach a `queue:work` daemon's spans from the `Command queue:work` span, which auto-laravel keeps open for the life of the process, so that they do not pile up in one ever-growing trace. The hook stays for the life of the process, so the value read by the first application booted in the process applies |
+| `worker_trace_context.enabled` | `OTEL_WORKER_TRACE_CONTEXT_ENABLED` | `true` | Detach a `queue:work` daemon's spans from the `Command queue:work` span, which auto-laravel keeps open for the life of the process, so that they do not pile up in one ever-growing trace. The hook cannot be removed, so once an application in the process has installed it, disabling the option in a later one has no effect |
 
 Bucket lists may be unordered and contain duplicates (they are sorted and de-duplicated), and invalid
 values (empty, non-numeric) fall back to the default.

@@ -98,15 +98,17 @@ class WorkerTraceContextTest extends TestCase
 
     public function test_a_failing_attach_does_not_reach_the_worker(): void
     {
+        // enter() は attach の前に Context::getCurrent() で current() を呼ぶので、そこは本物の context を返す。
+        $current = Context::getCurrent();
         $storage = Mockery::mock(ContextStorageInterface::class.', '.ExecutionContextAwareInterface::class);
-        $storage->shouldReceive('attach')->andThrow(new RuntimeException('attach exploded'));
+        $storage->shouldReceive('current')->andReturn($current);
+        $storage->shouldReceive('attach')->once()->andThrow(new RuntimeException('attach exploded'));
+        // attach に失敗した回の post は何もしない (storage に触らない)。
+        $storage->shouldNotReceive('scope');
         Context::setStorage($storage);
 
         ($this->pre)();
-        // attach に失敗した回の post は何もしない (storage に触らない)。
         ($this->post)();
-
-        $this->addToAssertionCount(1);
     }
 
     public function test_a_failing_detach_does_not_reach_the_worker(): void
