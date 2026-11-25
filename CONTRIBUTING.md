@@ -209,6 +209,22 @@ git push origin v1.2.3
 Check that CI is green on `main` before tagging: the tag itself does not run CI (`ci.yml` triggers on
 branches, not tags).
 
+Then create a GitHub release for the tag. Composer does not read it; it is where consumers find what
+changed.
+
+```bash
+gh release create v1.2.3 --verify-tag --title v1.2.3 --notes-file notes.md
+```
+
+The notes are written for a consumer deciding whether and how to upgrade:
+
+- Open with one paragraph saying whether this is a minor or a patch release and whether consumers need to
+  bump their constraint to pick it up.
+- Give each change its own heading, `## Changed: …` / `## Added: …` / `## Fixed: …`, with the pull
+  request number. Under it, say what consumers will see differently and anything they have to act on,
+  such as dashboards or rules that select on a changed attribute.
+- Leave out changes consumers cannot observe (tests, CI, refactoring).
+
 #### If you tag the wrong commit
 
 The `release tags` ruleset restricts creation, deletion and force-updates of every tag, with repository
