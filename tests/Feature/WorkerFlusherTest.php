@@ -13,6 +13,7 @@ use OpenTelemetry\API\Common\Time\Clock;
 use OpenTelemetry\API\Common\Time\TestClock;
 use OpenTelemetry\API\Metrics\Noop\NoopMeterProvider;
 use OpenTelemetry\API\Trace\NoopTracerProvider;
+use OpenTelemetry\Context\Context;
 use OpenTelemetry\SDK\Metrics\Data\Sum;
 use OpenTelemetry\SDK\Metrics\Data\Temporality;
 use OpenTelemetry\SDK\Metrics\MeterProviderBuilder;
@@ -478,5 +479,41 @@ class WorkerFlusherTest extends TestCase
         $clock->advanceSeconds(57);
         $dispatcher->until(new Looping('redis', 'default'));
         $this->assertSame(2, $attempts);
+    }
+
+    public function test_spans_started_during_a_flush_are_not_recorded(): void
+    {
+        // OTLP exporter の HTTP 送信は psr18 等の計装が span にする。forceFlush の中で span を作り、
+        // parentbased sampler (SDK 既定) がそれを記録しないことを見る。
+        $recording = null;
+        $tracerProvider = Mockery::mock(SdkTracerProvider::class);
+        $tracerProvider->shouldReceive('forceFlush')->andReturnUsing(function () use (&$recording): bool {
+            $recording = $this->tracerProvider->getTracer('test')->spanBuilder('POST')->startSpan()->isRecording();
+
+            return true;
+        });
+        $dispatcher = new Dispatcher;
+        (new WorkerFlusher($tracerProvider, $this->meterProvider))->subscribe($dispatcher);
+
+        $dispatcher->dispatch(new JobProcessing('redis', Mockery::mock(Job::class)));
+        $dispatcher->until(new Looping('redis', 'default'));
+
+        $this->assertFalse($recording);
+        // flush の外では従来どおり記録される。
+        $this->assertTrue($this->tracerProvider->getTracer('test')->spanBuilder('job-span')->startSpan()->isRecording());
+    }
+
+    public function test_the_context_is_restored_when_a_flush_fails(): void
+    {
+        $scope = Context::storage()->attach(Context::getCurrent());
+        $attempts = 0;
+        $dispatcher = new Dispatcher;
+        (new WorkerFlusher($this->tracerProviderThatFailsToFlush($attempts), $this->meterProvider))->subscribe($dispatcher);
+
+        $dispatcher->dispatch(new JobProcessing('redis', Mockery::mock(Job::class)));
+        $dispatcher->until(new Looping('redis', 'default'));
+
+        $this->assertSame(1, $attempts);
+        $this->assertSame($scope, Context::storage()->scope());
     }
 }
